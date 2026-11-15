@@ -69,3 +69,42 @@ test("live arena, mobile layout, replay and participant workshop", async ({
   ).toBeVisible();
   expect(errors).toEqual([]);
 });
+
+test("completed matches expose a working replay timeline and seed audit", async ({
+  page,
+  request,
+}) => {
+  test.setTimeout(70000);
+  let id = "";
+  await expect
+    .poll(
+      async () => {
+        const response = await request.get("/api/matches");
+        const result = await response.json();
+        id =
+          result.result.matches.find(
+            (m: { status: string; id: string }) => m.status === "complete",
+          )?.id ?? "";
+        return id;
+      },
+      { timeout: 60000, intervals: [250, 1000] },
+    )
+    .not.toBe("");
+  await page.goto("/");
+  const row = page
+    .locator("tr")
+    .filter({ hasText: `#${id.slice(0, 6).toUpperCase()}` });
+  await row.getByRole("button").click();
+  const slider = page.getByRole("slider", { name: "Draft timeline" });
+  await expect(slider).toBeVisible();
+  await slider.fill("0");
+  await expect(
+    page.getByText("CARD 1 / 52", { exact: false }).first(),
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Play replay", exact: true }).click();
+  await expect.poll(() => slider.inputValue()).not.toBe("0");
+  await page.getByRole("button", { name: "Pause replay", exact: true }).click();
+  await slider.fill((await slider.getAttribute("max")) ?? "0");
+  await page.getByRole("button", { name: "Shuffle integrity" }).click();
+  await expect(page.getByText("REVEALED SEED", { exact: true })).toBeVisible();
+});

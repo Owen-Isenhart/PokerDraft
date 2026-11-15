@@ -81,6 +81,11 @@ impl Store {
             r["events"].as_array_mut().ok_or("corrupt_events")?.push(json!({"seq":seq,"round":round,"kind":"aborted","data":{"seed":seed,"reason":"server_restart"}}));
             r["updated_ms"] = json!(crate::service::now_ms());
             r["private_seed"] = json!(seed);
+            let terminal = r["snapshot"].clone();
+            r["history"]
+                .as_array_mut()
+                .ok_or("corrupt_history")?
+                .push(terminal);
             records.push(r);
             for t in &mut world.tournaments {
                 for p in &mut t.pairings {
