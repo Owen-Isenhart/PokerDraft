@@ -32,7 +32,11 @@ fn hash(s: &str) -> String {
 }
 fn label(s: &str) -> Result<String, String> {
     let s = s.trim();
-    if !(2..=40).contains(&s.chars().count()) || s.chars().any(|c| c.is_control()) {
+    if !(2..=40).contains(&s.chars().count())
+        || s.chars().any(|c| {
+            c.is_control() || matches!(c,'\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        })
+    {
         Err("name_must_be_2_to_40_characters".into())
     } else {
         Ok(s.into())
@@ -153,7 +157,8 @@ pub struct Service {
     rules: Rules,
     max_live: usize,
     demo: bool,
-    retries: HashMap<String, (String, Value)>,
+    retries: HashMap<String, (String, Value, Instant, usize)>,
+    retry_bytes: usize,
     retry_order: VecDeque<String>,
     pub commands: u64,
     pub rejected: u64,
@@ -190,6 +195,7 @@ impl Service {
             max_live: 16,
             demo,
             retries: HashMap::new(),
+            retry_bytes: 0,
             retry_order: VecDeque::new(),
             commands: 0,
             rejected: 0,
@@ -198,8 +204,9 @@ impl Service {
         std::thread::Builder::new().name("competition-writer".into()).spawn(move||{
    while let Some(req)=rx.blocking_recv(){
     let result=match req{
-     Request::Read{kind,id,offset,reply}=>{let _=reply.send(service.read(&kind,&id,offset));Ok(())},
+     Request::Read{kind,id,offset,reply}=>{if !reply.is_closed(){let _=reply.send(service.read(&kind,&id,offset));}Ok(())},
      Request::Command{token,body,reply}=>{
+      if reply.is_closed(){continue;}
       service.commands+=1;
       let r=service.command(&token,&body);if r.is_err(){service.rejected+=1;}let fatal=r.as_ref().err().is_some_and(|e|e.starts_with("storage_failure:"));let _=reply.send(r);
       if fatal{Err("storage_failure".into())}else{Ok(())}
@@ -251,6 +258,9 @@ impl Service {
         json!({"id":b.id,"team_id":b.team_id,"team":self.world.teams.iter().find(|t|t.id==b.team_id).map(|t|&t.name),"name":b.name,"rating":b.rating,"games":b.games,"disabled":b.disabled,"created_ms":b.created_ms})
     }
     fn read(&self, kind: &str, id: &str, offset: usize) -> Result<Value, String> {
+        if offset > crate::security::MAX_OFFSET {
+            return Err("invalid_offset".into());
+        }
         match kind {
             "directory" => Ok(self.directory()),
             "health" => Ok(
@@ -367,11 +377,11 @@ impl Service {
             .any(|b| b.team_id == team && Some(b.id.as_str()) != except && self.busy(&b.id))
     }
     fn command(&mut self, token: &str, b: &Value) -> Result<Value, String> {
-        let op = b["op"].as_str().ok_or("missing_op")?;
-        let request_id = b["id"].as_str().ok_or("missing_request_id")?;
-        if request_id.is_empty() || request_id.len() > 100 {
-            return Err("invalid_request_id".into());
+        let (op, request_id) = crate::security::validate_request(b)?;
+        if token.len() > 256 {
+            return Err("invalid_credential".into());
         }
+        self.expire_receipts();
         // A public request ID is not an authorization credential. Never cache the
         // one-time owner secret from anonymous registration for receipt replay.
         if op == "create_team" {
@@ -398,7 +408,7 @@ impl Service {
         if op.starts_with("admin_") {
             self.admin(token)?;
         }
-        if let Some((old, result)) = self.retries.get(&key) {
+        if let Some((old, result, _, _)) = self.retries.get(&key) {
             return if old == &payload {
                 Ok(result.clone())
             } else {
@@ -406,15 +416,38 @@ impl Service {
             };
         }
         let result = self.apply(token, op, b)?;
-        // Bound global retry memory. Auction and inventory validation protects old duplicates.
-        self.retries.insert(key.clone(), (payload, result.clone()));
-        self.retry_order.push_back(key);
-        while self.retry_order.len() > 8192 {
-            if let Some(k) = self.retry_order.pop_front() {
-                self.retries.remove(&k);
+        // Reads do not need receipt replay. Bound cached secrets by bytes and age.
+        if !matches!(op, "auth" | "account") {
+            let bytes = key.len() + payload.len() + result.to_string().len();
+            if bytes <= 64 * 1024 {
+                self.retry_bytes += bytes;
+                self.retries.insert(
+                    key.clone(),
+                    (payload, result.clone(), Instant::now(), bytes),
+                );
+                self.retry_order.push_back(key);
+                while self.retry_bytes > 4 * 1024 * 1024 || self.retry_order.len() > 2048 {
+                    self.evict_receipt();
+                }
             }
         }
         Ok(result)
+    }
+    fn evict_receipt(&mut self) {
+        if let Some(key) = self.retry_order.pop_front()
+            && let Some((_, _, _, bytes)) = self.retries.remove(&key)
+        {
+            self.retry_bytes -= bytes;
+        }
+    }
+    fn expire_receipts(&mut self) {
+        while self.retry_order.front().is_some_and(|key| {
+            self.retries
+                .get(key)
+                .is_none_or(|(_, _, created, _)| created.elapsed() >= Duration::from_secs(120))
+        }) {
+            self.evict_receipt();
+        }
     }
     fn apply(&mut self, token: &str, op: &str, b: &Value) -> Result<Value, String> {
         match op {
@@ -845,6 +878,7 @@ impl Service {
         Ok(())
     }
     fn tick(&mut self) -> Result<(), String> {
+        self.expire_receipts();
         let due: Vec<_> = self
             .live
             .iter()
@@ -1032,6 +1066,7 @@ mod tests {
             max_live: 16,
             demo: false,
             retries: HashMap::new(),
+            retry_bytes: 0,
             retry_order: VecDeque::new(),
             commands: 0,
             rejected: 0,
@@ -1232,6 +1267,24 @@ mod tests {
                 .is_empty()
         );
         assert!(s.read("bot_matches", "missing", 0).is_err());
+    }
+    #[test]
+    fn receipts_expire_and_read_results_do_not_accumulate() {
+        let mut s = service();
+        let (owner, token, _) = user(&mut s, "Alpha");
+        let before = s.retries.len();
+        for _ in 0..20 {
+            cmd(&mut s, &owner, json!({"op":"account"})).unwrap();
+            cmd(&mut s, &token, json!({"op":"auth"})).unwrap();
+        }
+        assert_eq!(s.retries.len(), before);
+        for (_, _, created, _) in s.retries.values_mut() {
+            *created = Instant::now() - Duration::from_secs(121);
+        }
+        s.expire_receipts();
+        assert!(s.retries.is_empty());
+        assert_eq!(s.retry_bytes, 0);
+        assert!(label("bad\u{202e}name").is_err());
     }
     #[test]
     fn admin_authorization_required() {

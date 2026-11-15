@@ -1,4 +1,5 @@
 pub mod poker;
+pub mod replay;
 pub mod tournament;
 use poker::{best, evaluate, valid_cards};
 use rand::{SeedableRng, seq::SliceRandom};

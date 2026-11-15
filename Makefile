@@ -1,4 +1,4 @@
-.PHONY: setup build run dev check browser simulate smoke format
+.PHONY: security setup build run dev check browser simulate smoke format
 setup:
 	npm ci --prefix web
 build:
@@ -24,3 +24,6 @@ smoke:
 format:
 	cargo fmt --all
 	npm exec --prefix web -- prettier --write 'web/src/*' 'web/*.{json,ts,html}' 'web/tests/*.ts' sdk/typescript/bot.ts
+
+security:
+	python3 scripts/security_checks.py

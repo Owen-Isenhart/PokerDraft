@@ -154,9 +154,14 @@ function App() {
   const dirRef = useRef<Directory | null>(null);
   const errors = useRef(0);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [owner, setOwner] = useState(
-    () => sessionStorage.getItem("pokerdraft.owner") || "",
-  );
+  useEffect(() => {
+    try {
+      sessionStorage.removeItem("pokerdraft.owner");
+    } catch {
+      /* Storage may be disabled. */
+    }
+  }, []);
+  const [owner, setOwner] = useState("");
   const [account, setAccount] = useState<{
     team: { id: string; name: string };
     bots: Bot[];
@@ -1104,6 +1109,13 @@ function App() {
                       {t.entrants.length} entrants
                     </span>
                   </div>
+                  {t.state === "attention" && (
+                    <p role="status" className="error">
+                      This tournament is paused after three consecutive drawn
+                      games. The operator can review the replays and cancel it.
+                      No winner has been assigned.
+                    </p>
+                  )}
                   {t.champion && (
                     <div className="champion">
                       ♔ Champion: <strong>{name(t.champion)}</strong>
@@ -1489,7 +1501,6 @@ function Workshop({
                 }>("create_team", { name: teamName });
                 setOwner(r.owner_token);
                 setTokenInput(r.owner_token);
-                sessionStorage.setItem("pokerdraft.owner", r.owner_token);
                 setSecret({ label: "Owner credential", value: r.owner_token });
                 await load(r.owner_token);
                 refresh();
@@ -1520,15 +1531,14 @@ function Workshop({
               task(async () => {
                 await load(tokenInput);
                 setOwner(tokenInput);
-                sessionStorage.setItem("pokerdraft.owner", tokenInput);
               });
             }}
           >
             <span className="step-number">↩</span>
             <h2>Back at the bench?</h2>
             <p>
-              Restore your workshop with your owner credential. It stays in this
-              browser tab's session.
+              Restore your workshop with your owner credential. It stays in
+              memory until you lock or reload the workshop.
             </p>
             <label htmlFor="owner-credential">Owner credential</label>
             <input
@@ -1555,7 +1565,6 @@ function Workshop({
             <button
               className="text-link"
               onClick={() => {
-                sessionStorage.removeItem("pokerdraft.owner");
                 setOwner("");
                 setAccount(null);
                 setTokenInput("");
@@ -1702,7 +1711,6 @@ function Workshop({
                     owner,
                   );
                   setOwner(r.owner_token);
-                  sessionStorage.setItem("pokerdraft.owner", r.owner_token);
                   setSecret({
                     label: "New Owner credential",
                     value: r.owner_token,

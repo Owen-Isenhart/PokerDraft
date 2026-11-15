@@ -4,9 +4,36 @@ use serde_json::{Value, json};
 
 pub struct Store {
     pub conn: Connection,
+    _lease: Option<std::fs::File>,
 }
 impl Store {
     pub fn open(path: &str) -> rusqlite::Result<Self> {
+        // Lock the actual database inode for the process lifetime, before recovery.
+        // SQLite transaction locks alone cannot coordinate two authoritative engines.
+        let lease = if path == ":memory:" {
+            None
+        } else {
+            let mut options = std::fs::OpenOptions::new();
+            options.read(true).write(true).create(true).truncate(false);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let file = options
+                .open(path)
+                .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+            file.try_lock().map_err(|_| {
+                rusqlite::Error::InvalidParameterName("database_already_in_use".into())
+            })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                file.set_permissions(std::fs::Permissions::from_mode(0o600))
+                    .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+            }
+            Some(file)
+        };
         let conn = Connection::open(path)?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;
@@ -15,7 +42,10 @@ impl Store {
    CREATE TABLE IF NOT EXISTS matches(id TEXT PRIMARY KEY,status TEXT NOT NULL,created_ms INTEGER NOT NULL,updated_ms INTEGER NOT NULL,snapshot TEXT NOT NULL,events TEXT NOT NULL,history TEXT NOT NULL,seed TEXT NOT NULL,tournament TEXT);
    CREATE INDEX IF NOT EXISTS match_recent ON matches(created_ms DESC);
    INSERT OR IGNORE INTO migrations VALUES(1);")?;
-        Ok(Self { conn })
+        Ok(Self {
+            conn,
+            _lease: lease,
+        })
     }
     pub fn world(&self) -> Result<World, String> {
         let s: Option<String> = self
@@ -43,7 +73,7 @@ impl Store {
     }
     pub fn record(&self, id: &str) -> Result<Value, String> {
         self.conn.query_row("SELECT id,status,created_ms,updated_ms,snapshot,events,history,tournament FROM matches WHERE id=?1",[id],|r| {
-   let parse=|i|->rusqlite::Result<Value>{let s:String=r.get(i)?;Ok(serde_json::from_str(&s).unwrap_or(Value::Null))};
+   let parse=|i|->rusqlite::Result<Value>{let s:String=r.get(i)?;serde_json::from_str(&s).map_err(|e|rusqlite::Error::FromSqlConversionFailure(i,rusqlite::types::Type::Text,Box::new(e)))};
    Ok(json!({"id":r.get::<_,String>(0)?,"status":r.get::<_,String>(1)?,"created_ms":r.get::<_,i64>(2)?,"updated_ms":r.get::<_,i64>(3)?,"snapshot":parse(4)?,"events":parse(5)?,"history":parse(6)?,"tournament":r.get::<_,Option<String>>(7)?}))
   }).optional().map_err(|e|e.to_string())?.ok_or_else(||"match_not_found".into())
     }
@@ -108,5 +138,36 @@ impl Store {
         }
         self.save(Some(world), &records)?;
         Ok(count)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn only_one_engine_can_own_a_database_inode() {
+        let dir = std::env::temp_dir().join(format!("pokerdraft-lease-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("db.sqlite");
+        let path = path.to_str().unwrap();
+        let a = Store::open(path).unwrap();
+        assert!(Store::open(path).is_err());
+        #[cfg(unix)]
+        {
+            let alias = dir.join("alias.sqlite");
+            std::fs::hard_link(path, &alias).unwrap();
+            assert!(Store::open(alias.to_str().unwrap()).is_err());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                std::fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        drop(a);
+        assert!(Store::open(path).is_ok());
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }

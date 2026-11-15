@@ -182,3 +182,49 @@ fn tournament_draw_replay_and_final_series() {
     t.result(0, Some("b".into())).unwrap();
     assert_eq!(t.champion, Some("b".into()));
 }
+
+#[test]
+fn repeated_draws_suspend_without_inventing_a_winner() {
+    let mut t = tournament::Tournament::new("t".into(), "Cup".into(), 1, 2).unwrap();
+    t.register("a".into()).unwrap();
+    t.register("b".into()).unwrap();
+    t.start().unwrap();
+    for _ in 0..3 {
+        t.result(0, None).unwrap();
+    }
+    assert_eq!(t.state, "attention");
+    assert!(t.champion.is_none());
+    assert!(t.pairings[0].winner.is_none());
+}
+#[test]
+fn replay_verifier_enforces_chronology_history_and_terminal_state() {
+    let mut g = game(2);
+    let mut history = vec![g.snapshot()];
+    for _ in 0..52 {
+        for i in 0..2 {
+            play_house(&mut g, i);
+        }
+        g.settle().unwrap();
+        history.push(g.snapshot());
+    }
+    let r = serde_json::json!({"status":"complete","snapshot":g.snapshot(),"events":g.events,"history":history});
+    assert!(replay::verify(r.clone()).is_ok());
+    let mut missing = r.clone();
+    missing["events"].as_array_mut().unwrap().remove(0);
+    assert!(replay::verify(missing).is_err());
+    let mut history = r.clone();
+    history["history"][0]["pot"] = serde_json::json!(100);
+    assert!(replay::verify(history).is_err());
+    let mut early = r.clone();
+    let cash = early["events"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|e| e["kind"] == "cash_in")
+        .unwrap();
+    cash["kind"] = serde_json::json!("liquidation");
+    assert!(replay::verify(early).is_err());
+    let mut terminal = r;
+    terminal["status"] = serde_json::json!("aborted");
+    assert!(replay::verify(terminal).is_err());
+}

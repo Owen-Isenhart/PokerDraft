@@ -3,6 +3,24 @@
  */
 import { randomUUID } from "node:crypto";
 const url = process.env.POKERDRAFT_URL ?? "http://localhost:3000";
+const parsed = new URL(url);
+if (
+  !["http:", "https:", "ws:", "wss:"].includes(parsed.protocol) ||
+  parsed.username ||
+  parsed.password ||
+  parsed.search ||
+  parsed.hash
+)
+  throw new Error("Use a credential-free arena URL without query or fragment.");
+const local = ["localhost", "127.0.0.1", "[::1]"].includes(parsed.hostname);
+if (
+  ["http:", "ws:"].includes(parsed.protocol) &&
+  !local &&
+  process.env.POKERDRAFT_ALLOW_INSECURE !== "true"
+)
+  throw new Error(
+    "Use HTTPS/WSS outside loopback. Insecure development requires POKERDRAFT_ALLOW_INSECURE=true.",
+  );
 const token = process.env.POKERDRAFT_TOKEN;
 if (!token) throw new Error("Set POKERDRAFT_TOKEN to your bot credential.");
 type Player = { id: string; cards: number[]; balance: number; score: number };
@@ -215,7 +233,16 @@ function connect() {
     }
   }
   ws.onmessage = (e) => {
-    const m = JSON.parse(String(e.data));
+    let m: any;
+    try {
+      const text = String(e.data);
+      if (text.length > 2_000_000) throw new Error();
+      m = JSON.parse(text);
+      if (!m || typeof m !== "object" || Array.isArray(m)) throw new Error();
+    } catch {
+      ws.close();
+      return;
+    }
     if (m.type === "ack") {
       const p = pending.get(m.id);
       if (p) {

@@ -18,6 +18,8 @@ pub struct Pairing {
     pub winner: Option<String>,
     pub match_id: Option<String>,
     pub wins: [u8; 2],
+    #[serde(default)]
+    pub draws: u8,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Tournament {
@@ -104,6 +106,7 @@ impl Tournament {
             winner: if b.is_none() { Some(a) } else { None },
             match_id: None,
             wins: [0, 0],
+            draws: 0,
         });
     }
     fn swiss(&mut self) {
@@ -139,12 +142,17 @@ impl Tournament {
         }
         let Some(winner) = winner else {
             p.match_id = None;
+            p.draws = p.draws.saturating_add(1);
+            if p.draws >= 3 {
+                self.state = "attention".into();
+            }
             return Ok(());
         }; // Draw: replay, no arbitrary seat winner.
         if winner != p.a && Some(&winner) != p.b.as_ref() {
             return Err("invalid_winner".into());
         }
         p.match_id = None;
+        p.draws = 0;
         let side = usize::from(winner != p.a);
         p.wins[side] += 1;
         if self.state == "final" && p.wins[side] < 2 {

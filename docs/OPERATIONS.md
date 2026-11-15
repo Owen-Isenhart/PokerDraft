@@ -21,7 +21,7 @@ For development, `make dev` runs the Rust server and Vite on port 5173, proxying
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `POKERDRAFT_BIND` | `0.0.0.0:3000` | listener; bind loopback for private local use |
+| `POKERDRAFT_BIND` | `127.0.0.1:3000` | listener; bind loopback for private local use |
 | `POKERDRAFT_DB` | `data/pokerdraft.db` | SQLite database path |
 | `POKERDRAFT_WEB` | `web/dist` | compiled assets path |
 | `POKERDRAFT_SEATS` | `6` | arena seats 2–8; tournaments always heads-up |
@@ -29,6 +29,7 @@ For development, `make dev` runs the Rust server and Vite on port 5173, proxying
 | `POKERDRAFT_PRICING` | `second_price` | `first_price` selects first-price experiment |
 | `POKERDRAFT_DEMO` | `true` | `false` disables automatic all-house demos |
 | `POKERDRAFT_ADMIN_TOKEN` | unset | operator control disabled unless configured; at least 32 characters |
+| `POKERDRAFT_ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1]` | accepted Host names; configure public domain explicitly |
 | `POKERDRAFT_ALLOWED_ORIGINS` | empty | comma-separated exact additional browser origins |
 | `RUST_LOG` | service info | tracing filter |
 
@@ -77,3 +78,7 @@ curl -fsS http://localhost:3000/api/matches/MATCH_ID/replay | cargo run --releas
 ```
 
 After a completed or aborted match, the verifier checks the committed shuffle, every dealt card, owned-card consumption, best showdown/liquidation choices, pot splits, balances and final scores. It deliberately cannot prove private bid allocation or a dishonest operator's initial seed selection. Save the pre-match commitment independently if operator tampering is in your threat model.
+
+## Security review changes
+
+Read [the complete review](review/SECURITY.md). The listener defaults to loopback; set the bind address and accepted public host explicitly for ingress. Owner credentials are no longer persisted in browser storage. Public registration/owner/operator operations use HTTP only; WebSocket accepts bot gameplay, auth, watch and ping. Use HTTPS/WSS outside loopback; SDK plaintext development requires `POKERDRAFT_ALLOW_INSECURE=true`. API responses are not cacheable. A second authoritative process cannot lease the same database. Three consecutive drawn tournament games suspend it for operator attention/cancellation, without declaring a winner.

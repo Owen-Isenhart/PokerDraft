@@ -10,7 +10,7 @@ pokerdraft-engine = { path = "../engine" }
 axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["fs", "trace", "set-header"] }
-rusqlite = { version = "0.38", features = ["bundled", "backup"] }
+rusqlite = { version = "0.43", features = ["bundled", "backup"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rand = "0.8"

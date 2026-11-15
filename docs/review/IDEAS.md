@@ -51,7 +51,7 @@ These are proposals, not approved changes to game rules. The security/performanc
 
 ## Primary sources consulted
 
-- University of Alberta Computer Poker Research Group, [AIVAT research](https://poker.cs.ualberta.ca/publications/2017-aaaiw-aivat.pdf): variance-reduced agent evaluation motivates paired experiments; application here needs validation.
+- University of Alberta Computer Poker Research Group, [AIVAT research](https://poker.cs.ualberta.ca/news.html): variance-reduced agent evaluation motivates paired experiments; application here needs validation.
 - [OWASP WebSocket Security Cheat Sheet](https://cheatsheetseries.owasp.org/cheatsheets/WebSocket_Security_Cheat_Sheet.html): origins, per-message authorization, bounded messages and cross-connection abuse controls inform round 2.
 - [SQLite WAL](https://www.sqlite.org/wal.html): local shared-memory and single-writer constraints inform the proposed scaling boundary.
 - [Tokio broadcast](https://docs.rs/tokio/latest/tokio/sync/broadcast/index.html): bounded fan-out and lagged-consumer semantics inform round 3.

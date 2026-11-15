@@ -1,3 +1,4 @@
+mod security;
 mod service;
 mod store;
 use axum::{
@@ -10,14 +11,18 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
+use axum::{
+    extract::Request,
+    middleware::{self, Next},
+};
 use futures_util::{SinkExt, StreamExt};
+use security::{Quota, Security, public_error, validate_request};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use service::Handle;
 use std::{
-    collections::HashMap,
     net::{IpAddr, SocketAddr},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::{Duration, Instant},
 };
 use tower_http::{
@@ -28,73 +33,61 @@ use tower_http::{
 #[derive(Clone)]
 struct App {
     handle: Handle,
-    limits: Arc<Mutex<HashMap<IpAddr, Bucket>>>,
-    origins: Arc<Vec<String>>,
+    security: Arc<Security>,
     connections: Arc<tokio::sync::Semaphore>,
+    http: Arc<tokio::sync::Semaphore>,
 }
-struct Bucket {
-    window: Instant,
-    requests: u32,
-    registrations: u32,
-    connections: u32,
-}
-impl App {
-    fn limit(&self, ip: IpAddr, registration: bool, connection: bool) -> bool {
-        let mut map = self.limits.lock().unwrap();
-        if map.len() > 16384 {
-            map.retain(|_, b| b.window.elapsed() < Duration::from_secs(60));
-            if map.len() > 16384 && !map.contains_key(&ip) {
-                return false;
-            }
-        }
-        let b = map.entry(ip).or_insert_with(|| Bucket {
-            window: Instant::now(),
-            requests: 0,
-            registrations: 0,
-            connections: 0,
-        });
-        if b.window.elapsed() >= Duration::from_secs(60) {
-            *b = Bucket {
-                window: Instant::now(),
-                requests: 0,
-                registrations: 0,
-                connections: 0,
-            };
-        }
-        b.requests += 1;
-        if registration {
-            b.registrations += 1;
-        }
-        if connection {
-            b.connections += 1;
-        }
-        b.requests <= 600 && b.registrations <= 5 && b.connections <= 30
+async fn admission(
+    State(a): State<App>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if !a.security.host(request.headers()) {
+        return (StatusCode::FORBIDDEN, "host_rejected").into_response();
     }
-    fn origin(&self, h: &HeaderMap) -> bool {
-        let Some(origin) = h.get("origin") else {
-            return true;
-        };
-        let Ok(origin) = origin.to_str() else {
-            return false;
-        };
-        if self.origins.iter().any(|s| s == origin) {
-            return true;
-        }
-        let Some(host) = h.get("host").and_then(|h| h.to_str().ok()) else {
-            return false;
-        };
-        origin == format!("http://{host}") || origin == format!("https://{host}")
+    if !a.security.origin(request.headers()) {
+        return (StatusCode::FORBIDDEN, "origin_rejected").into_response();
     }
+    let api = request.uri().path().starts_with("/api/")
+        || matches!(request.uri().path(), "/healthz" | "/metrics");
+    let quota = if request.method() == axum::http::Method::POST {
+        Quota::Command
+    } else {
+        Quota::Read
+    };
+    if !a.security.admit(peer.ip(), quota) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"ok":false,"error":"rate_limited"})),
+        )
+            .into_response();
+    }
+    let Ok(_permit) = a.http.clone().try_acquire_owned() else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let mut response = match tokio::time::timeout(Duration::from_secs(5), next.run(request)).await {
+        Ok(r) => r,
+        Err(_) => StatusCode::REQUEST_TIMEOUT.into_response(),
+    };
+    if api {
+        response.headers_mut().insert(
+            axum::http::header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store"),
+        );
+    }
+    response
 }
 fn response(r: Result<Value, String>) -> Response {
     match r {
         Ok(v) => (StatusCode::OK, Json(json!({"ok":true,"result":v}))).into_response(),
         Err(e) => {
+            let e = public_error(&e);
             let status = if e.contains("auth_required") {
                 StatusCode::UNAUTHORIZED
             } else if e.ends_with("not_found") {
                 StatusCode::NOT_FOUND
-            } else if e == "server_busy" || e == "service_unavailable" {
+            } else if e == "server_busy" || e == "service_unavailable" || e == "internal_error" {
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
                 StatusCode::BAD_REQUEST
@@ -109,6 +102,9 @@ struct Paging {
     offset: usize,
 }
 async fn read(State(a): State<App>, Path(kind): Path<String>, Query(p): Query<Paging>) -> Response {
+    if p.offset > security::MAX_OFFSET {
+        return response(Err("invalid_offset".into()));
+    }
     response(a.handle.read(&kind, "", p.offset).await)
 }
 async fn read_match(State(a): State<App>, Path(id): Path<String>) -> Response {
@@ -119,6 +115,9 @@ async fn bot_history(
     Path(id): Path<String>,
     Query(p): Query<Paging>,
 ) -> Response {
+    if p.offset > security::MAX_OFFSET {
+        return response(Err("invalid_offset".into()));
+    }
     response(a.handle.read("bot_matches", &id, p.offset).await)
 }
 async fn team_history(
@@ -126,6 +125,9 @@ async fn team_history(
     Path(id): Path<String>,
     Query(p): Query<Paging>,
 ) -> Response {
+    if p.offset > security::MAX_OFFSET {
+        return response(Err("invalid_offset".into()));
+    }
     response(a.handle.read("team_matches", &id, p.offset).await)
 }
 async fn replay(State(a): State<App>, Path(id): Path<String>) -> Response {
@@ -137,10 +139,19 @@ async fn command(
     headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> Response {
-    if !a.origin(&headers) {
-        return response(Err("origin_rejected".into()));
+    if validate_request(&body).is_err() {
+        return response(Err("invalid_request".into()));
     }
-    if !a.limit(peer.ip(), body["op"] == "create_team", false) {
+    if body["op"] == "create_team" && !a.security.admit(peer.ip(), Quota::Register) {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            Json(json!({"ok":false,"error":"rate_limited"})),
+        )
+            .into_response();
+    }
+    if !["bid", "cash", "join", "leave", "auth"].contains(&body["op"].as_str().unwrap_or(""))
+        && !a.security.admit(peer.ip(), Quota::Control)
+    {
         return (
             StatusCode::TOO_MANY_REQUESTS,
             Json(json!({"ok":false,"error":"rate_limited"})),
@@ -161,78 +172,87 @@ async fn ws(
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if !a.origin(&headers) || !a.limit(peer.ip(), false, true) {
+    if !a.security.origin(&headers) || !a.security.admit(peer.ip(), Quota::Connect) {
         return StatusCode::FORBIDDEN.into_response();
     }
     let Ok(permit) = a.connections.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    let Ok(peer_permit) = a.security.sockets(peer.ip()).try_acquire_owned() else {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    };
     upgrade
         .max_message_size(8192)
         .max_frame_size(8192)
         .on_upgrade(move |socket| async move {
-            let _permit = permit;
-            session(socket, a).await
+            let _permit = (permit, peer_permit);
+            session(socket, a, peer.ip()).await
         })
         .into_response()
 }
-async fn session(socket: WebSocket, a: App) {
+async fn session(socket: WebSocket, a: App, peer: IpAddr) {
     let mut feed = a.handle.feed.subscribe();
     let (mut sink, mut source) = socket.split();
     let mut token = String::new();
     let mut bot = String::new();
     let mut watch = String::new();
-    let initial = match a.handle.read("directory", "", 0).await {
-        Ok(v) => v,
-        Err(_) => return,
+    let Ok(initial) = a.handle.read("directory", "", 0).await else {
+        return;
     };
-    if tokio::time::timeout(
-        Duration::from_secs(3),
-        sink.send(Message::Text(initial.to_string().into())),
-    )
-    .await
-    .is_err()
-    {
+    if !matches!(
+        tokio::time::timeout(
+            Duration::from_secs(3),
+            sink.send(Message::Text(initial.to_string().into()))
+        )
+        .await,
+        Ok(Ok(()))
+    ) {
         return;
     }
     let mut window = Instant::now();
-    let mut count = 0;
+    let mut count = 0u32;
     let mut heartbeat = tokio::time::interval(Duration::from_secs(20));
     let mut last_seen = Instant::now();
     loop {
         let outgoing = tokio::select! {
-         input=source.next()=>{
-          let Some(Ok(message))=input else{break;};last_seen=Instant::now();
-          match message{
-           Message::Text(text)=>{
-            if window.elapsed()>=Duration::from_secs(1){window=Instant::now();count=0;}count+=1;if count>30{break;}
-            let b:Value=match serde_json::from_str(text.as_str()){Ok(v)=>v,Err(_)=>{break;}};let rid=b["id"].clone();let op=b["op"].as_str().unwrap_or("");
-            let r=match op{
-             "ping"=>Ok(json!({"server_time_ms":service::now_ms()})),
-             "watch"=>{if let Some(id)=b["match_id"].as_str(){match a.handle.read("match",id,0).await{Ok(v)=>{watch=id.into();Ok(json!({"match":v}))},Err(e)=>Err(e)}}else{Err("missing_match_id".into())}},
-             "auth"=>{
-              if let Some(t)=b["token"].as_str(){let auth=json!({"op":"auth","id":rid});match a.handle.command(t.into(),auth).await{Ok(v)=>{token=t.into();bot=v["bot_id"].as_str().unwrap_or("").into();Ok(v)},Err(e)=>Err(e)}}else{Err("missing_token".into())}
-             },
-             _=>a.handle.command(token.clone(),b.clone()).await,
-            };
-            Some(match r{Ok(v)=>json!({"type":"ack","id":rid,"ok":true,"result":v}),Err(e)=>json!({"type":"ack","id":rid,"ok":false,"error":e})})
-           },
-           Message::Ping(p)=>{if sink.send(Message::Pong(p)).await.is_err(){break;}None},Message::Close(_)=>break,_=>None
-          }
-         },
-         event=feed.recv()=>{match event{Ok(f)=>{if f.topic=="directory"||f.topic==format!("match:{watch}")||(!bot.is_empty()&&f.bots.contains(&bot)){Some(f.value)}else{None}},Err(tokio::sync::broadcast::error::RecvError::Lagged(_))=>{break;},Err(_)=>break}},
-         _=heartbeat.tick()=>{if last_seen.elapsed()>Duration::from_secs(60){break;}Some(json!({"type":"heartbeat","server_time_ms":service::now_ms()}))}
+            input=source.next()=>{
+                let Some(Ok(message))=input else{break;};
+                if window.elapsed()>=Duration::from_secs(1){window=Instant::now();count=0;}
+                count+=1;
+                if count>30||!a.security.admit(peer,Quota::Command){break;}
+                last_seen=Instant::now();
+                match message {
+                    Message::Text(text)=>{
+                        let b:Value=match serde_json::from_str(text.as_str()){Ok(v)=>v,Err(_)=>break};
+                        let (op,rid)=match validate_request(&b){Ok(v)=>v,Err(_)=>break};
+                        let r=match op {
+                            "ping"=>Ok(json!({"server_time_ms":service::now_ms()})),
+                            "watch"=>{if let Some(id)=b["match_id"].as_str(){match a.handle.read("match",id,0).await{Ok(v)=>{watch=id.into();Ok(json!({"match":v}))},Err(e)=>Err(e)}}else{Err("missing_match_id".into())}},
+                            "auth"=>{
+                                token.clear();bot.clear();
+                                if let Some(t)=b["token"].as_str(){match a.handle.command(t.into(),json!({"op":"auth","id":rid})).await {Ok(v)=>{token=t.into();bot=v["bot_id"].as_str().unwrap_or("").into();Ok(v)},Err(e)=>Err(e)}}else{Err("missing_token".into())}
+                            },
+                            "bid"|"cash"|"join"|"leave"=>a.handle.command(token.clone(),b.clone()).await,
+                            _=>Err("transport_not_allowed".into()),
+                        };
+                        Some(Message::Text(match r{Ok(v)=>json!({"type":"ack","id":rid,"ok":true,"result":v}),Err(e)=>json!({"type":"ack","id":rid,"ok":false,"error":public_error(&e)})}.to_string().into()))
+                    },
+                    Message::Ping(p)=>Some(Message::Pong(p)),Message::Close(_)=>break,_=>None
+                }
+            },
+            event=feed.recv()=>match event {
+                Ok(f)=>if f.topic=="directory"||f.topic==format!("match:{watch}")||(!bot.is_empty()&&f.bots.contains(&bot)){Some(Message::Text(f.value.to_string().into()))}else{None},
+                Err(_)=>break,
+            },
+            _=heartbeat.tick()=>{if last_seen.elapsed()>Duration::from_secs(60){break;}Some(Message::Text(json!({"type":"heartbeat","server_time_ms":service::now_ms()}).to_string().into()))}
         };
-        if let Some(v) = outgoing {
-            match tokio::time::timeout(
-                Duration::from_secs(3),
-                sink.send(Message::Text(v.to_string().into())),
+        if let Some(v) = outgoing
+            && !matches!(
+                tokio::time::timeout(Duration::from_secs(3), sink.send(v)).await,
+                Ok(Ok(()))
             )
-            .await
-            {
-                Ok(Ok(())) => {}
-                _ => break,
-            }
+        {
+            break;
         }
     }
 }
@@ -297,18 +317,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         rules,
         std::env::var("POKERDRAFT_DEMO").as_deref() != Ok("false"),
     )?;
+    let security = Security::new(
+        &std::env::var("POKERDRAFT_ALLOWED_HOSTS")
+            .unwrap_or_else(|_| "localhost,127.0.0.1,[::1]".into()),
+        &std::env::var("POKERDRAFT_ALLOWED_ORIGINS").unwrap_or_default(),
+    )?;
     let app = App {
         handle: handle.clone(),
-        limits: Arc::new(Mutex::new(HashMap::new())),
-        origins: Arc::new(
-            std::env::var("POKERDRAFT_ALLOWED_ORIGINS")
-                .unwrap_or_default()
-                .split(',')
-                .filter(|s| !s.is_empty())
-                .map(str::to_owned)
-                .collect(),
-        ),
+        security: Arc::new(security),
         connections: Arc::new(tokio::sync::Semaphore::new(2048)),
+        http: Arc::new(tokio::sync::Semaphore::new(256)),
     };
     let web = std::env::var("POKERDRAFT_WEB").unwrap_or_else(|_| "web/dist".into());
     let router=Router::new().route("/api/command",post(command)).route("/api/bots/{id}/matches",get(bot_history)).route("/api/teams/{id}/matches",get(team_history)).route("/api/matches/{id}/replay",get(replay)).route("/api/matches/{id}",get(read_match)).route("/api/{kind}",get(read)).route("/healthz",get(health)).route("/metrics",get(metrics)).route("/ws",get(ws))
@@ -316,9 +334,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
   .layer(axum::extract::DefaultBodyLimit::max(8192))
   .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::X_CONTENT_TYPE_OPTIONS,HeaderValue::from_static("nosniff")))
   .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::REFERRER_POLICY,HeaderValue::from_static("no-referrer")))
-  .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::CONTENT_SECURITY_POLICY,HeaderValue::from_static("default-src 'self'; connect-src 'self' ws: wss:; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'")))
-  .layer(TraceLayer::new_for_http()).with_state(app);
-    let bind = std::env::var("POKERDRAFT_BIND").unwrap_or_else(|_| "0.0.0.0:3000".into());
+  .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::CONTENT_SECURITY_POLICY,HeaderValue::from_static("default-src 'self'; connect-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'self'")))
+  .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::X_FRAME_OPTIONS,HeaderValue::from_static("DENY")))
+  .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::HeaderName::from_static("permissions-policy"),HeaderValue::from_static("camera=(), microphone=(), geolocation=()")))
+  .layer(middleware::from_fn_with_state(app.clone(),admission))
+  .layer(TraceLayer::new_for_http().make_span_with(|r:&Request|tracing::info_span!("http",method=%r.method(),path=%r.uri().path())))
+  .with_state(app);
+    let bind = std::env::var("POKERDRAFT_BIND").unwrap_or_else(|_| "127.0.0.1:3000".into());
     let listener = tokio::net::TcpListener::bind(&bind).await?;
     tracing::info!(%bind,"Poker Draft listening");
     axum::serve(

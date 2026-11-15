@@ -1,5 +1,5 @@
 export async function api<T>(path: string): Promise<T> {
-  const response = await fetch(path);
+  const response = await fetch(path, { cache: "no-store", redirect: "error" });
   const data = await response.json();
   if (!data.ok) throw new Error(data.error ?? "request_failed");
   return data.result as T;
@@ -11,6 +11,8 @@ export async function command<T = Record<string, unknown>>(
 ): Promise<T> {
   const response = await fetch("/api/command", {
     method: "POST",
+    cache: "no-store",
+    redirect: "error",
     headers: {
       "Content-Type": "application/json",
       ...(token ? { Authorization: `Bearer ${token}` } : {}),

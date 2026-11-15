@@ -6,6 +6,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import itertools
+import ipaddress
+import time
 import json
 import os
 import socket
@@ -22,6 +24,24 @@ class ProtocolError(Exception):
     pass
 
 
+def arena_url(url: str):
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme not in ('http', 'https', 'ws', 'wss') or not parsed.hostname or parsed.username or parsed.password or parsed.fragment or parsed.query:
+        raise ValueError('Use a credential-free http(s)/ws(s) arena URL without query/fragment')
+    try:
+        loopback = ipaddress.ip_address(parsed.hostname).is_loopback
+    except ValueError:
+        loopback = parsed.hostname.lower() == 'localhost'
+    if parsed.scheme in ('http','ws') and not loopback and os.environ.get('POKERDRAFT_ALLOW_INSECURE') != 'true':
+        raise ValueError('Use HTTPS/WSS outside loopback; POKERDRAFT_ALLOW_INSECURE=true is an explicit development override')
+    return parsed
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, msg, headers, newurl):
+        return None  # Never forward a bearer credential to another origin.
+
+
 class Client:
     """Blocking RFC6455 text client; bounded frames, TLS verification, ping/pong.
 
@@ -29,21 +49,34 @@ class Client:
     Reconnect by constructing a fresh Client and authenticating again.
     """
     def __init__(self, url: str, timeout: float = 30):
-        parsed = urllib.parse.urlsplit(url)
-        if parsed.scheme not in ('http', 'https', 'ws', 'wss') or not parsed.hostname:
-            raise ValueError('Use an http(s) or ws(s) arena URL')
+        parsed = arena_url(url)
         secure = parsed.scheme in ('https', 'wss')
         port = parsed.port or (443 if secure else 80)
         raw = socket.create_connection((parsed.hostname, port), timeout=timeout)
-        self.socket = ssl.create_default_context().wrap_socket(raw, server_hostname=parsed.hostname) if secure else raw
+        try:
+            self.socket = ssl.create_default_context().wrap_socket(raw, server_hostname=parsed.hostname) if secure else raw
+        except BaseException:
+            raw.close()
+            raise
+        self.deadline = time.monotonic() + 10
+        self.timeout = timeout
+        try:
+            self._handshake(parsed,port)
+        except BaseException:
+            self.socket.close()
+            raise
+        self.deadline = None
+
+    def _handshake(self, parsed, port):
         self.pending: deque[dict] = deque()
         self.buffer = bytearray()
         nonce = base64.b64encode(os.urandom(16)).decode()
-        host = parsed.hostname + (f':{port}' if port not in (80, 443) else '')
+        host = (f'[{parsed.hostname}]' if ':' in parsed.hostname else parsed.hostname) + (f':{port}' if port not in (80, 443) else '')
         path = (parsed.path.rstrip('/') + '/ws') if parsed.path not in ('', '/', '/ws') else '/ws'
         request = f'GET {path} HTTP/1.1\r\nHost: {host}\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Key: {nonce}\r\nSec-WebSocket-Version: 13\r\n\r\n'
         self.socket.sendall(request.encode())
         while b'\r\n\r\n' not in self.buffer:
+            self.socket.settimeout(max(.001,self.deadline-time.monotonic()))
             data = self.socket.recv(4096)
             if not data:
                 raise ProtocolError('WebSocket handshake closed')
@@ -53,17 +86,21 @@ class Client:
         headers, extra = self.buffer.split(b'\r\n\r\n', 1)
         self.buffer = bytearray(extra)
         lines = headers.decode('latin1').split('\r\n')
-        if ' 101 ' not in lines[0]:
+        if len(lines[0].split()) < 2 or lines[0].split()[1] != '101':
             self.close()
             raise ProtocolError(f'WebSocket refused: {lines[0]}')
         fields = {k.lower().strip(): v.strip() for k, v in (line.split(':', 1) for line in lines[1:] if ':' in line)}
         expected = base64.b64encode(hashlib.sha1((nonce + '258EAFA5-E914-47DA-95CA-C5AB0DC85B11').encode()).digest()).decode()
-        if fields.get('sec-websocket-accept') != expected or fields.get('upgrade', '').lower() != 'websocket':
+        if fields.get('sec-websocket-accept') != expected or fields.get('upgrade', '').lower() != 'websocket' or 'upgrade' not in [s.strip().lower() for s in fields.get('connection','').split(',')] or fields.get('sec-websocket-extensions'):
             self.close()
             raise ProtocolError('Invalid WebSocket handshake')
 
     def _read(self, size: int) -> bytes:
         while len(self.buffer) < size:
+            remaining = self.timeout if self.deadline is None else self.deadline-time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('Arena command deadline exceeded')
+            self.socket.settimeout(remaining)
             part = self.socket.recv(max(4096, size - len(self.buffer)))
             if not part:
                 raise ConnectionError('Arena disconnected')
@@ -98,6 +135,8 @@ class Client:
                 size = struct.unpack('!Q', self._read(8))[0]
             if size > 2_000_000 or len(fragments) + size > 2_000_000:
                 raise ProtocolError('Arena message too large')
+            if opcode >= 8 and (not final or size > 125):
+                raise ProtocolError('Invalid WebSocket control frame')
             payload = self._read(size)
             if opcode == 8:
                 raise ConnectionError('Arena closed the connection')
@@ -111,7 +150,10 @@ class Client:
             fragments.extend(payload)
             fragmented = not final
             if final:
-                return json.loads(fragments.decode('utf-8'))
+                message = json.loads(fragments.decode('utf-8'))
+                if not isinstance(message, dict):
+                    raise ProtocolError('Arena message must be an object')
+                return message
 
     def receive(self) -> dict:
         return self.pending.popleft() if self.pending else self._receive()
@@ -119,31 +161,42 @@ class Client:
     def command(self, op: str, *, request_id: str | None = None, **fields) -> dict:
         rid = request_id or str(uuid.uuid4())
         self.send(dict(op=op, id=rid, **fields))
-        while True:
-            message = self._receive()
-            if message.get('type') == 'ack' and message.get('id') == rid:
-                if not message.get('ok'):
-                    raise ProtocolError(message.get('error', 'command_rejected'))
-                return message['result']
-            self.pending.append(message)
-            if len(self.pending) > 512:
-                raise ProtocolError('Consumer too slow; reconnect for a fresh snapshot')
+        self.deadline = time.monotonic() + 10
+        try:
+            while True:
+                message = self._receive()
+                if message.get('type') == 'ack' and message.get('id') == rid:
+                    if not message.get('ok'):
+                        raise ProtocolError(message.get('error', 'command_rejected'))
+                    return message['result']
+                self.pending.append(message)
+                if len(self.pending) > 512:
+                    raise ProtocolError('Consumer too slow; reconnect for a fresh snapshot')
+
+        finally:
+            self.deadline = None
 
     def close(self):
         self.socket.close()
 
 
 def http_command(url: str, op: str, token: str = '', **fields) -> dict:
+    arena_url(url)
     data = json.dumps(dict(op=op, id=str(uuid.uuid4()), **fields)).encode()
     headers = {'Content-Type': 'application/json'}
     if token:
         headers['Authorization'] = f'Bearer {token}'
     request = urllib.request.Request(url.rstrip('/') + '/api/command', data=data, headers=headers)
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
-            result = json.load(response)
+        with urllib.request.build_opener(NoRedirect).open(request, timeout=10) as response:
+            raw = response.read(2_000_001)
+            if len(raw)>2_000_000:
+                raise ProtocolError('HTTP response too large')
+            result = json.loads(raw)
     except urllib.error.HTTPError as error:
-        result = json.load(error)
+        if 300 <= error.code < 400:
+            raise ProtocolError('HTTP redirect refused') from None
+        result = json.loads(error.read(8192))
     if not result.get('ok'):
         raise ProtocolError(result.get('error', 'http_failed'))
     return result['result']

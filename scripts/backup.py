@@ -18,7 +18,9 @@ def main():
     with sqlite3.connect(source.as_uri() + '?mode=ro', uri=True) as db:
         with sqlite3.connect(destination) as backup:
             db.backup(backup, pages=256)
-            assert backup.execute('PRAGMA integrity_check').fetchone()[0] == 'ok'
+            result = backup.execute('PRAGMA integrity_check').fetchone()[0]
+            if result != 'ok':
+                raise RuntimeError('Backup failed integrity verification')
     print(f'Verified backup: {destination}')
 
 
