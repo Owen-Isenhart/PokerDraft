@@ -1,0 +1,23 @@
+# Research review and decisions
+
+The supplied report is retained in `research-original.txt`. Its recommendations are hypotheses, not specifications. This review finalizes the research needed to build v1; tuning the economy remains an empirical task supported by the simulator.
+
+## Findings
+
+* Scrabblebot is the direct reference: a rolling lobby, one-second sealed auctions, an external bot protocol, spectator interface, credentials, versioned teams, ratings and tournaments. Its source is MIT licensed. We implement original code and retain the concept, rather than transplant a service dependent on maincloud. Source: https://github.com/clockworklabs/scrabblebot (reviewed 2026-11-15).
+* Novelty cannot be proven by a web search. There may be prior auction-poker variants. No novelty or “world first” claim belongs in the product.
+* This is a multiplayer stochastic game with private simultaneous actions, not a single-agent MDP. Public award identities plus public cash-ins reveal all inventories. V1 deliberately makes inventories public; only current bids and the future deck are secret. No Bayesian hidden-hand claims.
+* Vickrey truthfulness assumes conditions that fail here: budget constraints, complementary cards, repeated competition and relative ranking. Second-price is a game-design choice, not a provably optimal mechanism. First-price is also supported for controlled comparison.
+* A trusted central server with TLS and private bid storage already seals bids from participants. Blockchain mempool defenses and threshold committees introduce complexity without solving this project's threat model. Commit–reveal does not eliminate geographical delay and a 200 ms reveal window excludes some routes. We use one immutable bid per player per auction, a full 1,000 ms default window, monotonic server deadlines and arrival-independent tie breaks. Timing is configurable. RTT still matters; publish measurements and allow longer tournament windows.
+* The future deck remains unknown. Revealed cards determine the *set* of remaining cards, not their order. Shuffle and tie randomness are domain-separated. A SHA-256 commitment before play plus seed disclosure after completion makes the server's shuffle reproducible, not trustless: an operator can still choose a seed or abort. Abort status remains public and never updates ratings.
+* A sorting/counting five-card evaluator is quite sufficient for a maximum 252 subsets of a ten-card inventory. Optimize only against measured performance and exhaustive hand-category counts. Hundreds of millions of SIMD evaluations per second are not an engine requirement. Exact best-of-ten and a fast allocation-free five-card rank are included.
+* CFR's standard Nash convergence result is for two-player zero-sum games; this six-player resource-creating economy does not qualify. Deep CFR and GPUs are optional participant research, never an installation requirement. Source: Zinkevich et al., https://proceedings.neurips.cc/paper_files/paper/2007/hash/08d98638c6fcd194a4b1e6992063e944-Abstract.html and linked paper.
+* Collusion and multiple human identities cannot be cryptographically eliminated in anonymous open registration. One active version per team per queue, tournament registration locks, public replay, rate limits and operator revocation provide concrete controls. Stochastic reserve prices and hiding winners would obscure rules without establishing collusion resistance.
+
+## Stack and cost
+
+Rust, Tokio/Axum, bundled SQLite, React/TypeScript/Vite, Python standard-library SDK and a TypeScript SDK. All runtime paths work offline after installing dependencies. No API keys, proprietary model, commercial database, managed identity provider, paid analytics, cloud platform or GPU required. Browser traffic uses a persistent WebSocket. Rust/Axum supports async networking without a C++ mandate: https://github.com/tokio-rs/axum/tree/0.8.x . SQLite WAL provides durable atomic commits on one local host, with one writer: https://www.sqlite.org/wal.html . Do not put a WAL database on NFS or run multiple writers against a shared k3s volume. Future horizontal scaling assigns distinct matches to isolated workers; deployment itself is out of current scope.
+
+## Performance discipline
+
+Measure five-card evaluation, best-of-ten, full seeded matches, command acknowledgement and fan-out. Correctness precedes micro-optimization. Timer drift, durable storage latency and slow consumers are observable. No advertised throughput without a reproducible benchmark. Seeded simulations let us inspect economy (cash-ins, balances, pot distribution and strategy win rates) without wall-clock waits.

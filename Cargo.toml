@@ -1,0 +1,13 @@
+[workspace]
+members = ["crates/engine", "crates/server"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+rust-version = "1.90"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
