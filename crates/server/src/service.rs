@@ -72,14 +72,58 @@ pub struct World {
 }
 #[derive(Clone)]
 pub struct Feed {
-    pub topic: String,
-    pub bots: Vec<String>,
-    pub value: Value,
+    pub topic: std::sync::Arc<str>,
+    pub bots: std::sync::Arc<[String]>,
+    pub value: axum::extract::ws::Utf8Bytes,
+}
+impl Feed {
+    pub fn new(topic: &str, bots: Vec<String>, value: Value) -> Self {
+        Self {
+            topic: topic.into(),
+            bots: bots.into(),
+            value: value.to_string().into(),
+        }
+    }
+    pub fn message(&self) -> axum::extract::ws::Message {
+        axum::extract::ws::Message::Text(self.value.clone())
+    }
 }
 #[derive(Clone)]
 pub struct Handle {
     tx: mpsc::Sender<Request>,
+    archive: mpsc::Sender<ArchiveRequest>,
     pub feed: broadcast::Sender<Feed>,
+}
+struct ArchiveRequest {
+    kind: String,
+    id: String,
+    offset: usize,
+    reply: oneshot::Sender<Result<Value, String>>,
+}
+#[derive(Default)]
+struct Indexes {
+    owners: HashMap<String, usize>,
+    tokens: HashMap<String, usize>,
+    teams: HashMap<String, usize>,
+    bots: HashMap<String, usize>,
+    team_bots: HashMap<String, Vec<usize>>,
+    team_names: HashSet<String>,
+}
+impl Indexes {
+    fn new(w: &World) -> Self {
+        let mut x = Self::default();
+        for (i, t) in w.teams.iter().enumerate() {
+            x.owners.insert(t.owner_hash.clone(), i);
+            x.teams.insert(t.id.clone(), i);
+            x.team_names.insert(t.name.to_lowercase());
+        }
+        for (i, b) in w.bots.iter().enumerate() {
+            x.tokens.insert(b.token_hash.clone(), i);
+            x.bots.insert(b.id.clone(), i);
+            x.team_bots.entry(b.team_id.clone()).or_default().push(i);
+        }
+        x
+    }
 }
 pub enum Request {
     Read {
@@ -94,12 +138,28 @@ pub enum Request {
         reply: oneshot::Sender<Result<Value, String>>,
     },
     Tick,
+    Metrics {
+        reply: oneshot::Sender<Result<Value, String>>,
+    },
     Shutdown {
         reply: oneshot::Sender<()>,
     },
 }
 impl Handle {
     pub async fn read(&self, kind: &str, id: &str, offset: usize) -> Result<Value, String> {
+        if [
+            "replay",
+            "matches",
+            "bot_matches",
+            "team_matches",
+            "bots",
+            "leaderboard",
+            "tournaments",
+        ]
+        .contains(&kind)
+        {
+            return self.archive(kind, id, offset).await;
+        }
         let (tx, rx) = oneshot::channel();
         self.tx
             .try_send(Request::Read {
@@ -109,7 +169,30 @@ impl Handle {
                 reply: tx,
             })
             .map_err(|_| "server_busy")?;
-        rx.await.map_err(|_| "service_unavailable")?
+        let result = tokio::time::timeout(Duration::from_secs(3), rx)
+            .await
+            .map_err(|_| "server_busy")?
+            .map_err(|_| "service_unavailable")?;
+        if result.as_ref().err().is_some_and(|e| e == "archive_lookup") {
+            self.archive("match", id, offset).await
+        } else {
+            result
+        }
+    }
+    async fn archive(&self, kind: &str, id: &str, offset: usize) -> Result<Value, String> {
+        let (tx, rx) = oneshot::channel();
+        self.archive
+            .try_send(ArchiveRequest {
+                kind: kind.into(),
+                id: id.into(),
+                offset,
+                reply: tx,
+            })
+            .map_err(|_| "server_busy")?;
+        tokio::time::timeout(Duration::from_secs(3), rx)
+            .await
+            .map_err(|_| "server_busy")?
+            .map_err(|_| "service_unavailable")?
     }
     pub async fn command(&self, token: String, body: Value) -> Result<Value, String> {
         let (tx, rx) = oneshot::channel();
@@ -120,7 +203,20 @@ impl Handle {
                 reply: tx,
             })
             .map_err(|_| "server_busy")?;
-        rx.await.map_err(|_| "service_unavailable")?
+        tokio::time::timeout(Duration::from_secs(3), rx)
+            .await
+            .map_err(|_| "server_busy")?
+            .map_err(|_| "service_unavailable")?
+    }
+    pub async fn metrics(&self) -> Result<Value, String> {
+        let (tx, rx) = oneshot::channel();
+        self.tx
+            .try_send(Request::Metrics { reply: tx })
+            .map_err(|_| "server_busy")?;
+        tokio::time::timeout(Duration::from_secs(3), rx)
+            .await
+            .map_err(|_| "server_busy")?
+            .map_err(|_| "service_unavailable")?
     }
     pub async fn shutdown(&self) {
         let (tx, rx) = oneshot::channel();
@@ -136,10 +232,16 @@ struct Live {
     deadline_ms: u64,
     history: Vec<Snapshot>,
     tournament: Option<(String, usize)>,
+    saved_events: usize,
+    saved_history: usize,
 }
 impl Live {
     fn record(&self, id: &str, status: &str) -> Value {
-        json!({"id":id,"status":status,"created_ms":self.created_ms,"updated_ms":now_ms(),"snapshot":self.game.snapshot(),"events":self.game.events,"history":self.history,"private_seed":self.seed,"tournament":self.tournament.as_ref().map(|t|&t.0)})
+        json!({"id":id,"status":status,"created_ms":self.created_ms,"updated_ms":now_ms(),"snapshot":self.game.snapshot(),"events":self.game.events[self.saved_events..],"history":self.history[self.saved_history..],"history_start":self.saved_history,"private_seed":self.seed,"tournament":self.tournament.as_ref().map(|t|&t.0)})
+    }
+    fn mark_persisted(&mut self) {
+        self.saved_events = self.game.events.len();
+        self.saved_history = self.history.len();
     }
     fn public(&self, id: &str) -> Value {
         json!({"id":id,"status":"live","deadline_ms":self.deadline_ms,"server_time_ms":now_ms(),"snapshot":self.game.snapshot(),"events":self.game.events.iter().rev().take(12).cloned().collect::<Vec<_>>()})
@@ -148,6 +250,7 @@ impl Live {
 pub struct Service {
     store: Store,
     world: World,
+    indexes: Indexes,
     live: HashMap<String, Live>,
     queue: VecDeque<String>,
     lobby_deadline: Instant,
@@ -172,18 +275,37 @@ impl Service {
         demo: bool,
     ) -> Result<Handle, String> {
         rules.validate().map_err(|e| e.to_string())?;
+        if path == ":memory:" {
+            return Err("service_requires_file_database".into());
+        }
         let mut store = Store::open(path).map_err(|e| e.to_string())?;
         let mut world = store.world()?;
         let recovered = store.recover(&mut world)?;
         tracing::info!(recovered, "opened durable store");
+        let mut reader = Store::reader(path).map_err(|e| e.to_string())?;
+        let (archive, mut archive_rx) = mpsc::channel::<ArchiveRequest>(64);
+        std::thread::Builder::new()
+            .name("public-archive-reader".into())
+            .spawn(move || {
+                while let Some(req) = archive_rx.blocking_recv() {
+                    if !req.reply.is_closed() {
+                        let _ = req
+                            .reply
+                            .send(reader.archive(&req.kind, &req.id, req.offset));
+                    }
+                }
+            })
+            .map_err(|e| e.to_string())?;
         let (tx, mut rx) = mpsc::channel(2048);
         let (feed, _) = broadcast::channel(512);
         let handle = Handle {
             tx: tx.clone(),
+            archive,
             feed: feed.clone(),
         };
         let mut service = Self {
             store,
+            indexes: Indexes::new(&world),
             world,
             live: HashMap::new(),
             queue: VecDeque::new(),
@@ -202,8 +324,10 @@ impl Service {
             max_tick_lag_ms: 0,
         };
         std::thread::Builder::new().name("competition-writer".into()).spawn(move||{
+   let mut last_tick=Instant::now();
    while let Some(req)=rx.blocking_recv(){
-    let result=match req{
+    if matches!(&req,Request::Tick)||last_tick.elapsed()>=Duration::from_millis(10){if let Err(error)=service.tick(){tracing::error!(%error,"competition tick failed");break;}last_tick=Instant::now();}
+    let result:Result<(),String>=match req{
      Request::Read{kind,id,offset,reply}=>{if !reply.is_closed(){let _=reply.send(service.read(&kind,&id,offset));}Ok(())},
      Request::Command{token,body,reply}=>{
       if reply.is_closed(){continue;}
@@ -211,7 +335,8 @@ impl Service {
       let r=service.command(&token,&body);if r.is_err(){service.rejected+=1;}let fatal=r.as_ref().err().is_some_and(|e|e.starts_with("storage_failure:"));let _=reply.send(r);
       if fatal{Err("storage_failure".into())}else{Ok(())}
      },
-     Request::Tick=>service.tick(),
+     Request::Tick=>Ok(()),
+     Request::Metrics{reply}=>{let _=reply.send(Ok(service.metrics()));Ok(())},
      Request::Shutdown{reply}=>{let r=service.abort_all("server_shutdown");let _=reply.send(());if let Err(e)=r{tracing::error!(%e,"shutdown persistence failed");}break;}
     };
     if let Err(error)=result{tracing::error!(%error,"competition service stopped to preserve durability");break;}
@@ -222,7 +347,9 @@ impl Service {
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
             loop {
                 interval.tick().await;
-                if tx.send(Request::Tick).await.is_err() {
+                if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) =
+                    tx.try_send(Request::Tick)
+                {
                     break;
                 }
             }
@@ -232,7 +359,9 @@ impl Service {
     fn persist(&mut self, records: &[Value]) -> Result<(), String> {
         self.store
             .save(Some(&self.world), records)
-            .map_err(|e| format!("storage_failure:{e}"))
+            .map_err(|e| format!("storage_failure:{e}"))?;
+        self.indexes = Indexes::new(&self.world);
+        Ok(())
     }
     fn persist_records(&mut self, records: &[Value]) -> Result<(), String> {
         self.store
@@ -240,11 +369,7 @@ impl Service {
             .map_err(|e| format!("storage_failure:{e}"))
     }
     fn publish(&self, topic: &str, bots: Vec<String>, value: Value) {
-        let _ = self.feed.send(Feed {
-            topic: topic.into(),
-            bots,
-            value,
-        });
+        let _ = self.feed.send(Feed::new(topic, bots, value));
     }
     fn directory(&self) -> Value {
         let mut matches:Vec<_>=self.live.iter().map(|(id,l)|json!({"id":id,"round":l.game.round,"players":l.game.players.iter().map(|p|json!({"id":p.id,"name":p.name,"house":p.house})).collect::<Vec<_>>(),"tournament":l.tournament.as_ref().map(|t|&t.0)})).collect();
@@ -255,7 +380,7 @@ impl Service {
         self.publish("directory", vec![], self.directory());
     }
     fn bot_public(&self, b: &Bot) -> Value {
-        json!({"id":b.id,"team_id":b.team_id,"team":self.world.teams.iter().find(|t|t.id==b.team_id).map(|t|&t.name),"name":b.name,"rating":b.rating,"games":b.games,"disabled":b.disabled,"created_ms":b.created_ms})
+        json!({"id":b.id,"team_id":b.team_id,"team":self.indexes.teams.get(&b.team_id).map(|&i|&self.world.teams[i].name),"name":b.name,"rating":b.rating,"games":b.games,"disabled":b.disabled||self.indexes.teams.get(&b.team_id).is_some_and(|&i|self.world.teams[i].disabled),"created_ms":b.created_ms})
     }
     fn read(&self, kind: &str, id: &str, offset: usize) -> Result<Value, String> {
         if offset > crate::security::MAX_OFFSET {
@@ -264,7 +389,7 @@ impl Service {
         match kind {
             "directory" => Ok(self.directory()),
             "health" => Ok(
-                json!({"status":"ok","protocol":1,"active_matches":self.live.len(),"commands":self.commands,"rejected":self.rejected,"max_tick_lag_ms":self.max_tick_lag_ms}),
+                json!({"status":"ok","protocol":1,"active_matches":self.live.len(),"max_tick_lag_ms":self.max_tick_lag_ms}),
             ),
             "leaderboard" => {
                 let mut bots: Vec<_> = self
@@ -275,10 +400,10 @@ impl Service {
                         !b.disabled
                             && b.games > 0
                             && self
-                                .world
+                                .indexes
                                 .teams
-                                .iter()
-                                .any(|t| t.id == b.team_id && !t.disabled)
+                                .get(&b.team_id)
+                                .is_some_and(|&i| !self.world.teams[i].disabled)
                     })
                     .collect();
                 bots.sort_by(|a, b| b.rating.total_cmp(&a.rating));
@@ -294,7 +419,7 @@ impl Service {
                 if let Some(l) = self.live.get(id) {
                     Ok(l.public(id))
                 } else {
-                    self.store.record(id)
+                    Err("archive_lookup".into())
                 }
             }
             "replay" => self.store.record(id),
@@ -325,28 +450,30 @@ impl Service {
             _ => Err("not_found".into()),
         }
     }
+    fn metrics(&self) -> Value {
+        json!({"commands":self.commands,"rejected":self.rejected,"active_matches":self.live.len(),"max_tick_lag_ms":self.max_tick_lag_ms})
+    }
     fn owner(&self, token: &str) -> Result<String, String> {
-        let h = hash(token);
-        self.world
-            .teams
-            .iter()
-            .find(|t| t.owner_hash == h && !t.disabled)
+        self.indexes
+            .owners
+            .get(&hash(token))
+            .map(|&i| &self.world.teams[i])
+            .filter(|t| !t.disabled)
             .map(|t| t.id.clone())
             .ok_or("owner_auth_required".into())
     }
     fn bot(&self, token: &str) -> Result<String, String> {
-        let h = hash(token);
-        self.world
-            .bots
-            .iter()
-            .find(|b| {
-                b.token_hash == h
-                    && !b.disabled
+        self.indexes
+            .tokens
+            .get(&hash(token))
+            .map(|&i| &self.world.bots[i])
+            .filter(|b| {
+                !b.disabled
                     && self
-                        .world
+                        .indexes
                         .teams
-                        .iter()
-                        .any(|t| t.id == b.team_id && !t.disabled)
+                        .get(&b.team_id)
+                        .is_some_and(|&i| !self.world.teams[i].disabled)
             })
             .map(|b| b.id.clone())
             .ok_or("bot_auth_required".into())
@@ -364,17 +491,18 @@ impl Service {
                 .live
                 .values()
                 .any(|l| l.game.players.iter().any(|p| p.id == bot))
-            || self
-                .world
-                .tournaments
-                .iter()
-                .any(|t| t.occupied().contains(bot))
+            || self.world.tournaments.iter().any(|t| {
+                !["complete", "cancelled"].contains(&t.state.as_str())
+                    && t.entrants.iter().any(|e| e.bot == bot)
+            })
     }
     fn team_busy(&self, team: &str, except: Option<&str>) -> bool {
-        self.world
-            .bots
-            .iter()
-            .any(|b| b.team_id == team && Some(b.id.as_str()) != except && self.busy(&b.id))
+        self.indexes.team_bots.get(team).is_some_and(|bots| {
+            bots.iter().any(|&i| {
+                let b = &self.world.bots[i];
+                Some(b.id.as_str()) != except && self.busy(&b.id)
+            })
+        })
     }
     fn command(&mut self, token: &str, b: &Value) -> Result<Value, String> {
         let (op, request_id) = crate::security::validate_request(b)?;
@@ -456,12 +584,7 @@ impl Service {
                     return Err("registration_full".into());
                 }
                 let name = label(b["name"].as_str().ok_or("missing_name")?)?;
-                if self
-                    .world
-                    .teams
-                    .iter()
-                    .any(|t| t.name.to_lowercase() == name.to_lowercase())
-                {
+                if self.indexes.team_names.contains(&name.to_lowercase()) {
                     return Err("team_name_taken".into());
                 }
                 let owner_token = secret();
@@ -487,7 +610,11 @@ impl Service {
             "create_bot" => {
                 let team = self.owner(token)?;
                 if self.world.bots.len() >= 10000
-                    || self.world.bots.iter().filter(|b| b.team_id == team).count() >= 100
+                    || self
+                        .indexes
+                        .team_bots
+                        .get(&team)
+                        .is_some_and(|bots| bots.len() >= 100)
                 {
                     return Err("version_limit".into());
                 }
@@ -608,6 +735,7 @@ impl Service {
                     let public = l.public(mid);
                     let bots = l.game.players.iter().map(|p| p.id.clone()).collect();
                     self.persist_records(&[record])?;
+                    self.live.get_mut(mid).unwrap().mark_persisted();
                     self.publish(
                         &format!("match:{mid}"),
                         bots,
@@ -797,6 +925,17 @@ impl Service {
         tournament: Option<(String, usize)>,
         demo: bool,
     ) -> Result<(), String> {
+        let mut seed = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut seed);
+        self.start_match_seeded(ids, tournament, demo, seed)
+    }
+    fn start_match_seeded(
+        &mut self,
+        ids: Vec<String>,
+        tournament: Option<(String, usize)>,
+        demo: bool,
+        seed: [u8; 32],
+    ) -> Result<(), String> {
         let mut players: Vec<_> = ids
             .iter()
             .map(|id| {
@@ -827,8 +966,6 @@ impl Service {
                 true,
             ));
         }
-        let mut seed = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut seed);
         let game = Game::new(
             Rules {
                 seats,
@@ -857,6 +994,8 @@ impl Service {
             deadline_ms: now_ms() + self.rules.auction_ms,
             history: vec![snap],
             tournament,
+            saved_events: 0,
+            saved_history: 0,
         };
         let record = l.record(&mid, "live");
         if l.tournament.is_some() {
@@ -864,6 +1003,7 @@ impl Service {
         } else {
             self.persist_records(&[record])?;
         }
+        l.mark_persisted();
         l.deadline = Instant::now() + Duration::from_millis(self.rules.auction_ms);
         l.deadline_ms = now_ms() + self.rules.auction_ms;
         let public = l.public(&mid);
@@ -886,7 +1026,9 @@ impl Service {
             .map(|(id, _)| id.clone())
             .collect();
         for mid in due {
-            let l = self.live.get_mut(&mid).unwrap();
+            let Some(l) = self.live.get_mut(&mid) else {
+                continue;
+            };
             self.max_tick_lag_ms = self.max_tick_lag_ms.max(
                 Instant::now()
                     .saturating_duration_since(l.deadline)
@@ -906,6 +1048,7 @@ impl Service {
                 let record = l.record(&mid, "live");
                 self.persist_records(&[record])?;
                 let l = self.live.get_mut(&mid).unwrap();
+                l.mark_persisted();
                 l.deadline = Instant::now() + Duration::from_millis(l.game.rules.auction_ms);
                 l.deadline_ms = now_ms() + l.game.rules.auction_ms;
                 let public = l.public(&mid);
@@ -987,6 +1130,7 @@ impl Service {
                 b.games += 1;
             }
         }
+        let mut suspended = None;
         if let Some((tid, ix)) = &l.tournament {
             let winner = if real[0].score == real[1].score {
                 None
@@ -1001,9 +1145,23 @@ impl Service {
                 && t.state != "cancelled"
             {
                 t.result(*ix, winner)?;
+                if t.state == "attention" {
+                    suspended = Some(tid.clone());
+                }
             }
         }
         self.persist(&[l.record(mid, "complete")])?;
+        if let Some(tid) = suspended {
+            let others: Vec<_> = self
+                .live
+                .iter()
+                .filter(|(_, game)| game.tournament.as_ref().is_some_and(|t| t.0 == tid))
+                .map(|(id, _)| id.clone())
+                .collect();
+            for id in others {
+                self.abort_match(&id, "tournament_suspended")?;
+            }
+        }
         let mut public = l.public(mid);
         public["status"] = json!("complete");
         let bots = l.game.players.iter().map(|p| p.id.clone()).collect();
@@ -1052,6 +1210,7 @@ mod tests {
         Service {
             store: Store::open(":memory:").unwrap(),
             world: World::default(),
+            indexes: Indexes::default(),
             live: HashMap::new(),
             queue: VecDeque::new(),
             lobby_deadline: Instant::now() + Duration::from_secs(30),
@@ -1287,6 +1446,105 @@ mod tests {
         assert!(label("bad\u{202e}name").is_err());
     }
     #[test]
+    fn incremental_round_commits_reconstruct_a_complete_verified_replay() {
+        let mut s = service();
+        let (_, _, a) = user(&mut s, "Alpha");
+        let (_, _, b) = user(&mut s, "Bravo");
+        s.start_match(vec![a, b], None, false).unwrap();
+        let mid = s.live.keys().next().unwrap().clone();
+        for _ in 0..52 {
+            s.live.get_mut(&mid).unwrap().deadline = Instant::now();
+            s.tick().unwrap();
+        }
+        let r = s.store.record(&mid).unwrap();
+        assert_eq!(r["history"].as_array().unwrap().len(), 53);
+        assert_eq!(r["events"].as_array().unwrap().len(), 58);
+        assert!(pokerdraft_engine::replay::verify(r).is_ok());
+    }
+    #[test]
+    fn drawn_tournament_suspension_aborts_other_pairings_without_rating_them() {
+        let mut s = service();
+        let cup = cmd(
+            &mut s,
+            "test-admin",
+            json!({"op":"admin_create_tournament","name":"Draw Cup","cut":4,"swiss_rounds":1}),
+        )
+        .unwrap();
+        let tid = cup["tournament"]["id"].clone();
+        for name in ["Alpha", "Bravo", "Charlie", "Delta"] {
+            let (owner, _, bot) = user(&mut s, name);
+            cmd(
+                &mut s,
+                &owner,
+                json!({"op":"register_tournament","tournament_id":tid,"bot_id":bot}),
+            )
+            .unwrap();
+        }
+        cmd(
+            &mut s,
+            "test-admin",
+            json!({"op":"admin_start_tournament","tournament_id":tid}),
+        )
+        .unwrap();
+        s.tick().unwrap();
+        let pair = 0;
+        let mut target = String::new();
+        for draw in 0..3 {
+            let mid = s.world.tournaments[0].pairings[pair]
+                .match_id
+                .clone()
+                .unwrap();
+            target = mid.clone();
+            let l = s.live.get_mut(&mid).unwrap();
+            while !l.game.snapshot().finished {
+                l.game.settle().unwrap();
+                l.history.push(l.game.snapshot());
+            }
+            s.complete(&mid).unwrap();
+            if draw < 2 {
+                s.tick().unwrap();
+            }
+        }
+        assert_eq!(s.world.tournaments[0].state, "attention");
+        assert!(s.live.is_empty());
+        assert!(s.world.tournaments[0].champion.is_none());
+        let records = s.store.recent(20, 0).unwrap();
+        assert_eq!(
+            records.iter().filter(|r| r["status"] == "aborted").count(),
+            1
+        );
+        assert_eq!(
+            records.iter().filter(|r| r["status"] == "complete").count(),
+            3
+        );
+        assert!(pokerdraft_engine::replay::verify(s.store.record(&target).unwrap()).is_ok());
+        assert!(s.read("health", "", 0).unwrap().get("commands").is_none());
+    }
+    #[test]
+    fn ratings_preserve_exact_bits_across_durable_reload() {
+        let mut s = service();
+        user(&mut s, "Alpha");
+        user(&mut s, "Bravo");
+        let mut ratings = vec![1500., 1500.];
+        for i in 0..128 {
+            ratings = elo_updates(&ratings, if i % 3 == 0 { &[1, 0] } else { &[0, 1] });
+            for (bot, &rating) in s.world.bots.iter_mut().zip(&ratings) {
+                bot.rating = rating;
+            }
+            s.persist(&[]).unwrap();
+            let loaded = s.store.world().unwrap();
+            for (bot, &rating) in loaded.bots.iter().zip(&ratings) {
+                assert_eq!(
+                    bot.rating.to_bits(),
+                    rating.to_bits(),
+                    "rating changed across JSON storage: {} -> {}",
+                    rating,
+                    bot.rating
+                );
+            }
+        }
+    }
+    #[test]
     fn admin_authorization_required() {
         let mut s = service();
         assert_eq!(
@@ -1335,5 +1593,29 @@ mod tests {
         s.store.recover(&mut w).unwrap();
         assert!(w.tournaments[0].pairings[0].match_id.is_none());
         assert_eq!(w.tournaments[0].state, "swiss");
+    }
+}
+
+#[cfg(feature = "profiling")]
+#[path = "profile.rs"]
+pub mod profile;
+
+#[cfg(test)]
+mod optimization_tests {
+    use super::*;
+    #[test]
+    fn public_frames_share_serialized_bytes() {
+        let f = Feed::new(
+            "directory",
+            vec!["public-id".into()],
+            json!({"public":true}),
+        );
+        let copy = f.clone();
+        assert_eq!(f.value.as_str().as_ptr(), copy.value.as_str().as_ptr());
+        assert!(std::sync::Arc::ptr_eq(&f.bots, &copy.bots));
+        assert_eq!(
+            serde_json::from_str::<Value>(f.value.as_str()).unwrap(),
+            json!({"public":true})
+        );
     }
 }

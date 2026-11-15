@@ -76,7 +76,12 @@ impl Security {
         let Some(host) = h.get("host").and_then(|s| s.to_str().ok()) else {
             return false;
         };
-        origin == format!("http://{host}") || origin == format!("https://{host}")
+        let local = authority_host(host).is_some_and(|h| {
+            h == "localhost"
+                || h.parse::<std::net::IpAddr>()
+                    .is_ok_and(|ip| ip.is_loopback())
+        });
+        origin == format!("https://{host}") || (local && origin == format!("http://{host}"))
     }
     pub fn admit(&self, ip: IpAddr, quota: Quota) -> bool {
         let mut map = self.buckets.lock().unwrap();
@@ -105,14 +110,12 @@ impl Security {
         b.counts[i] += 1;
         true
     }
-    pub fn sockets(&self, ip: IpAddr) -> Arc<Semaphore> {
+    pub fn sockets(&self, ip: IpAddr) -> Option<Arc<Semaphore>> {
         self.buckets
             .lock()
             .unwrap()
             .get(&ip)
-            .expect("admit connect before socket lease")
-            .sockets
-            .clone()
+            .map(|b| b.sockets.clone())
     }
 }
 fn authority_host(s: &str) -> Option<String> {
@@ -199,7 +202,7 @@ mod tests {
         }
         assert!(!s.admit(ip, Quota::Register));
         assert!(s.admit(ip, Quota::Connect));
-        let sem = s.sockets(ip);
+        let sem = s.sockets(ip).unwrap();
         let permits: Vec<_> = (0..32)
             .map(|_| sem.clone().try_acquire_owned().unwrap())
             .collect();

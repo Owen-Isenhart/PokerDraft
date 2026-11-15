@@ -29,13 +29,14 @@ For development, `make dev` runs the Rust server and Vite on port 5173, proxying
 | `POKERDRAFT_PRICING` | `second_price` | `first_price` selects first-price experiment |
 | `POKERDRAFT_DEMO` | `true` | `false` disables automatic all-house demos |
 | `POKERDRAFT_ADMIN_TOKEN` | unset | operator control disabled unless configured; at least 32 characters |
+| `POKERDRAFT_METRICS_TOKEN` | unset | metrics disabled unless separately configured; bearer secret at least 32 characters |
 | `POKERDRAFT_ALLOWED_HOSTS` | `localhost,127.0.0.1,[::1]` | accepted Host names; configure public domain explicitly |
 | `POKERDRAFT_ALLOWED_ORIGINS` | empty | comma-separated exact additional browser origins |
 | `RUST_LOG` | service info | tracing filter |
 
 Use a random operator token, for example `python3 -c 'import secrets; print(secrets.token_hex(32))'`. Set it in your local process environment or future k3s Secret; do not commit it. Operator console is at `/#operator`. No configured admin means public play/team management works but operator mutations are unavailable. Tokens passed to external bot starters use `POKERDRAFT_TOKEN` and `POKERDRAFT_URL`, never the operator credential.
 
-Serve external users through free TLS tooling such as your existing homelab ingress. Set the public origin explicitly and preserve WebSocket upgrades. Do not disable certificate validation. Set proxy request/body/socket/rate limits based on real client IP; the application ignores spoofable X-Forwarded-For. Multiple users through one proxy otherwise share application peer limits. Public APIs expose public competition data; keep `/metrics` internal using proxy routing if desired.
+Serve external users through free TLS tooling such as your existing homelab ingress. Set the public origin explicitly and preserve WebSocket upgrades. Do not disable certificate validation. Set proxy request/body/socket/rate limits based on real client IP; the application ignores spoofable X-Forwarded-For. Multiple users through one proxy otherwise share application peer limits. Public APIs expose public competition data. `/metrics` requires its own configured bearer token; proxy restrictions can further limit access.
 
 ## Persistence and restart
 
@@ -43,7 +44,9 @@ Run one authoritative instance. Use a local POSIX volume supporting SQLite WAL/f
 
 SIGINT/SIGTERM aborts current matches, discloses their seeds, leaves ratings unchanged and preserves tournament reservations for replay on restart. A hard kill is recovered the same way at next startup. Queue reservations and receipt cache are ephemeral. Agents reconnect/authenticate and rejoin automatically. Pausing new matches is durable and does not pause active rounds. Tournament completion and cancellation release reservations.
 
-`GET /healthz` checks actor responsiveness. `/metrics` exposes command/rejection totals, active matches and maximum observed scheduler lag in milliseconds. Compare lag and command acknowledgement latency with the configured bidding window. Storage errors fail the actor closed; inspect logs and disk capacity, then restart after fixing the underlying error. No automatic silent fallback to memory.
+`GET /healthz` checks actor responsiveness and exposes only status/protocol, active matches and scheduler lag. `/metrics` is disabled (404) without `POKERDRAFT_METRICS_TOKEN`; when configured, send `Authorization: Bearer <metrics token>`. It exposes command/rejection totals, active matches and maximum observed scheduler lag in milliseconds. Compare lag and command acknowledgement latency with the configured bidding window. Storage errors fail the actor closed; inspect logs and disk capacity, then restart after fixing the underlying error. No automatic silent fallback to memory.
+
+Schema v2 is migrated automatically in a transaction. Take a verified backup before upgrading, stop every older binary first, and do not downgrade against the migrated file; restore the pre-upgrade backup with the matching older binary if rolling back. Unknown future schemas fail closed. Archived reads use a separate read-only connection; only one process owns competition writes.
 
 ## Backup and restore
 
@@ -58,6 +61,8 @@ To restore: stop the server, preserve the existing database plus WAL/SHM as a ro
 ## Validation and performance
 
 ```sh
+make profile                   # isolated storage/auth/fan-out fixture; see review/OPTIMIZATION.md
+make security                  # isolated real-network security checks
 make check                     # engine/service tests (including exhaustive evaluation), clippy, web build
 make browser                   # requires running local server and Chromium
 python3 scripts/smoke.py        # isolated real bots, complete games, tournament and restart checks

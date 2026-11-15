@@ -34,6 +34,8 @@ Set a random 32+ character `POKERDRAFT_ADMIN_TOKEN` before starting the server t
 
 [Exact rules](docs/RULES.md) · [Protocol/API](docs/PROTOCOL.md) · [Architecture](docs/ARCHITECTURE.md) · [Operation/backup/configuration](docs/OPERATIONS.md) · [Research review](docs/RESEARCH.md) · [Full implementation plan](docs/PLAN.md) · [Validation](docs/VALIDATION.md) · [Delivery status](docs/STATUS.md)
 
+Review follow-up: [Ideas for review](docs/review/IDEAS.md) · [Security findings and fixes](docs/review/SECURITY.md) · [Optimization measurements](docs/review/OPTIMIZATION.md).
+
 ```sh
 make check
 make browser                 # local server + Chromium required

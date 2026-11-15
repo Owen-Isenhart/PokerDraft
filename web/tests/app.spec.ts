@@ -123,3 +123,59 @@ test("completed matches expose a working replay timeline and seed audit", async 
   await page.getByRole("button", { name: "Shuffle integrity" }).click();
   await expect(page.getByText("REVEALED SEED", { exact: true })).toBeVisible();
 });
+
+test("public paging reaches later roster and rankings pages", async ({
+  page,
+}) => {
+  const bot = (i: number) => ({
+    id: `fixture-${i}`,
+    team_id: `team-${i}`,
+    team: `Paging Team ${i}`,
+    name: `Paging Bot ${i}`,
+    rating: 1600 - i,
+    games: 10,
+    disabled: false,
+    created_ms: 0,
+  });
+  for (const kind of ["bots", "leaderboard"]) {
+    await page.route(`**/api/${kind}?*`, async (route) => {
+      const offset = Number(
+        new URL(route.request().url()).searchParams.get("offset") || 0,
+      );
+      const bots = Array.from(
+        { length: Math.max(0, Math.min(100, 101 - offset)) },
+        (_, i) => bot(offset + i),
+      );
+      await route.fulfill({
+        json: {
+          ok: true,
+          result: {
+            bots,
+            total: 101,
+            offset,
+            next_offset: offset === 0 ? 100 : null,
+          },
+        },
+      });
+    });
+  }
+  await page.goto("/#rankings");
+  await expect(page.locator(".contender")).toHaveCount(100);
+  await page
+    .getByRole("button", { name: "Next roster page", exact: true })
+    .click();
+  await expect(page.locator(".contender")).toHaveCount(1);
+  await expect(page.locator(".contender")).toContainText("Paging Bot 100");
+  await expect(
+    page.getByRole("button", { name: "Next roster page", exact: true }),
+  ).toBeDisabled();
+  await page
+    .getByRole("button", { name: "Next rankings page", exact: true })
+    .click();
+  await expect(page.locator("table").first().locator("tbody tr")).toHaveCount(1);
+  await page
+    .getByRole("button", { name: "Previous roster page", exact: true })
+    .click();
+  await expect(page.locator(".contender")).toHaveCount(100);
+  await expect(page.locator("table").first().locator("tbody tr")).toHaveCount(1);
+});

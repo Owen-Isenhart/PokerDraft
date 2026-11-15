@@ -1,4 +1,4 @@
-.PHONY: security setup build run dev check browser simulate smoke format
+.PHONY: profile security setup build run dev check browser simulate smoke format
 setup:
 	npm ci --prefix web
 build:
@@ -12,7 +12,7 @@ dev:
 check:
 	python3 -m unittest discover -s sdk/python -p 'test_*.py'
 	cargo fmt --all -- --check
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cargo test --workspace --release
 	npm run build --prefix web
 browser:
@@ -27,3 +27,7 @@ format:
 
 security:
 	python3 scripts/security_checks.py
+
+# Isolated temporary 1,000-account/archive fixture; no live database touched.
+profile:
+	cargo run --release -p pokerdraft-server --features profiling --bin profile -- 1000

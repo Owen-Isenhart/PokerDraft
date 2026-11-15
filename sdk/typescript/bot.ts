@@ -163,6 +163,8 @@ function connect() {
     if (s.finished) {
       if (completed.has(m.id)) return;
       completed.add(m.id);
+      if (completed.size > 128)
+        completed.delete(completed.values().next().value!);
       console.log(
         `Match ${m.id.slice(0, 8)} ${m.status}: score ${s.players[seat].score}`,
       );

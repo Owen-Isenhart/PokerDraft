@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { api, command } from "./api";
 import type {
@@ -112,6 +112,130 @@ function ErrorNote({ message }: { message: string }) {
     </p>
   ) : null;
 }
+function useClock(period: number) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), period);
+    return () => clearInterval(timer);
+  }, [period]);
+  return now;
+}
+function AuctionClock({
+  match,
+  snap,
+  offset,
+}: {
+  match: Match | null;
+  snap: Snapshot | null;
+  offset: number;
+}) {
+  const now = useClock(100);
+  const remaining = match?.deadline_ms
+    ? Math.max(0, match.deadline_ms - now - offset)
+    : 0;
+  const fraction =
+    snap && !snap.finished ? remaining / snap.rules.auction_ms : 0;
+  return (
+    <div className="auction-clock">
+      <span className="eyebrow light">
+        {snap?.finished ? "MATCH COMPLETE" : "BIDDING WINDOW"}
+      </span>
+      <div className="clock-number">
+        {snap?.finished ? "52" : (remaining / 1000).toFixed(1)}
+        <small>{snap?.finished ? "/52" : "s"}</small>
+      </div>
+      <div className="clock-track">
+        <span style={{ width: `${Math.min(1, fraction) * 100}%` }} />
+      </div>
+      <p>
+        {snap?.finished
+          ? match?.status === "aborted"
+            ? "Match aborted · unrated"
+            : "All auctions resolved"
+          : `Next showdown at card ${Math.min(52, (Math.floor((snap?.round ?? 0) / 13) + 1) * 13)}`}
+      </p>
+    </div>
+  );
+}
+function LobbyCountdown({
+  deadline,
+  offset,
+  paused,
+}: {
+  deadline?: number;
+  offset: number;
+  paused?: boolean;
+}) {
+  const now = useClock(1000);
+  return (
+    <p>
+      {paused
+        ? "New matches are paused."
+        : `Lobby starts in ${Math.max(0, Math.ceil(((deadline ?? now) - (now + offset)) / 1000))}s. House agents fill open seats.`}
+    </p>
+  );
+}
+function PageControls({
+  label,
+  offset,
+  total,
+  size,
+  onChange,
+}: {
+  label: string;
+  offset: number;
+  total: number;
+  size: number;
+  onChange: (n: number) => void;
+}) {
+  return (
+    <div className="page-controls" aria-label={`${label} pagination`}>
+      <span>
+        {total && offset < total
+          ? `${offset + 1}–${Math.min(total, offset + size)} of ${total}`
+          : total
+            ? "No entries on this page"
+            : "0 entries"}
+      </span>
+      <button
+        className="text-link"
+        aria-label={`Previous ${label} page`}
+        disabled={offset === 0}
+        onClick={() => onChange(Math.max(0, offset - size))}
+      >
+        ← Previous
+      </button>
+      <button
+        className="text-link"
+        aria-label={`Next ${label} page`}
+        disabled={offset + size >= total}
+        onClick={() => onChange(offset + size)}
+      >
+        Next →
+      </button>
+    </div>
+  );
+}
+function PreviousPairings({
+  history,
+  name,
+}: {
+  history: Tournament["history"];
+  name: (id: string | null) => string;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <details onToggle={(e) => setOpen(e.currentTarget.open)}>
+      <summary>Previous pairings ({history.length})</summary>
+      {open &&
+        history.map((p) => (
+          <p key={p.id}>
+            {name(p.a)} vs {name(p.b)} → {name(p.winner)}
+          </p>
+        ))}
+    </details>
+  );
+}
 function App() {
   const [page, setPage] = useState(location.hash.slice(1) || "arena");
   const [dir, setDir] = useState<Directory | null>(null);
@@ -121,6 +245,27 @@ function App() {
   const [archive, setArchive] = useState<Summary[]>([]);
   const [archiveOffset, setArchiveOffset] = useState(0);
   const [bots, setBots] = useState<Bot[]>([]);
+  const [pages, setPages] = useState({
+    roster: 0,
+    rankings: 0,
+    tournaments: 0,
+  });
+  const pageRef = useRef(pages);
+  const [totals, setTotals] = useState({
+    roster: 0,
+    rankings: 0,
+    tournaments: 0,
+  });
+  const [tournamentNames, setTournamentNames] = useState<
+    Record<string, string>
+  >({});
+  const [profileBotIds, setProfileBotIds] = useState<Set<string>>(new Set());
+  function paginate(kind: keyof typeof pages, offset: number) {
+    pageRef.current = { ...pageRef.current, [kind]: offset };
+    setPages(pageRef.current);
+    refresh();
+  }
+
   const [leaderboard, setLeaderboard] = useState<Bot[]>([]);
   const [profile, setProfile] = useState<Bot | null>(null);
   const [profileHistory, setProfileHistory] = useState<Summary[]>([]);
@@ -128,11 +273,12 @@ function App() {
   const [profileOffset, setProfileOffset] = useState(0);
   async function viewProfile(b: Bot, team = false, offset = 0) {
     try {
-      const r = await api<{ matches: Summary[] }>(
+      const r = await api<{ matches: Summary[]; bot_ids?: string[] }>(
         `/api/${team ? "teams" : "bots"}/${team ? b.team_id : b.id}/matches?offset=${offset}`,
       );
       setProfile(b);
       setProfileHistory(r.matches);
+      setProfileBotIds(new Set(r.bot_ids ?? [b.id]));
       setProfileTeam(team);
       setProfileOffset(offset);
     } catch (e) {
@@ -142,7 +288,6 @@ function App() {
   const [tournaments, setTournaments] = useState<Tournament[]>([]);
   const [standings, setStandings] = useState<Standings[]>([]);
   const [error, setError] = useState("");
-  const [now, setNow] = useState(Date.now());
   const [clockOffset, setClockOffset] = useState(0);
   const [replayIndex, setReplayIndex] = useState<number | null>(null);
   const [playing, setPlaying] = useState(false);
@@ -171,26 +316,57 @@ function App() {
     setPage(p);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
+  const refreshing = useRef(false);
+  const refreshAgain = useRef(false);
   async function refresh() {
+    if (refreshing.current) {
+      refreshAgain.current = true;
+      return;
+    }
+    refreshing.current = true;
+    const requested = { ...pageRef.current };
     try {
       const [a, b, t, r] = await Promise.all([
         api<{ matches: Summary[] }>("/api/matches"),
-        api<{ bots: Bot[] }>("/api/bots"),
-        api<{ tournaments: Tournament[]; standings: Standings[] }>(
-          "/api/tournaments",
+        api<{ bots: Bot[]; total: number }>(
+          `/api/bots?offset=${requested.roster}`,
         ),
-        api<{ bots: Bot[] }>("/api/leaderboard"),
+        api<{
+          tournaments: Tournament[];
+          standings: Standings[];
+          total: number;
+          names: Record<string, string>;
+        }>(`/api/tournaments?offset=${requested.tournaments}`),
+        api<{ bots: Bot[]; total: number }>(
+          `/api/leaderboard?offset=${requested.rankings}`,
+        ),
       ]);
       if (archiveOffsetRef.current === 0) {
         setArchive(a.matches);
         setArchiveOffset(0);
       }
-      setBots(b.bots);
-      setTournaments(t.tournaments);
-      setStandings(t.standings);
-      setLeaderboard(r.bots);
+      if (JSON.stringify(requested) === JSON.stringify(pageRef.current)) {
+        setBots(b.bots);
+        setTournaments(t.tournaments);
+        setStandings(t.standings);
+        setLeaderboard(r.bots);
+        setTournamentNames(t.names ?? {});
+        setTotals({
+          roster: b.total ?? b.bots.length,
+          rankings: r.total ?? r.bots.length,
+          tournaments: t.total ?? t.tournaments.length,
+        });
+      } else {
+        refreshAgain.current = true;
+      }
     } catch (e) {
       setError(String(e));
+    } finally {
+      refreshing.current = false;
+      if (refreshAgain.current) {
+        refreshAgain.current = false;
+        refresh();
+      }
     }
   }
   async function loadMatch(id: string, replay = false) {
@@ -221,11 +397,11 @@ function App() {
     const update = () => setPage(location.hash.slice(1) || "arena");
     window.addEventListener("hashchange", update);
     refresh();
-    const timer = setInterval(() => setNow(Date.now()), 100);
-    const polling = setInterval(refresh, 15000);
+    const polling = setInterval(() => {
+      if (document.visibilityState === "visible") refresh();
+    }, 15000);
     return () => {
       window.removeEventListener("hashchange", update);
-      clearInterval(timer);
       clearInterval(polling);
     };
   }, []);
@@ -348,15 +524,15 @@ function App() {
     replayIndex !== null && match?.history
       ? (match.history[replayIndex] ?? match.snapshot)
       : (match?.snapshot ?? null);
-  const name = (id: string | null) =>
-    bots.find((b) => b.id === id)
-      ? `${bots.find((b) => b.id === id)!.team} / ${bots.find((b) => b.id === id)!.name}`
-      : (id?.slice(0, 8) ?? "Bye");
-  const remaining = match?.deadline_ms
-    ? Math.max(0, match.deadline_ms - (now + clockOffset))
-    : 0;
-  const fraction =
-    snap && !snap.finished ? remaining / snap.rules.auction_ms : 0;
+  const botById = useMemo(() => new Map(bots.map((b) => [b.id, b])), [bots]);
+  const name = (id: string | null) => {
+    const b = id ? botById.get(id) : null;
+    return b
+      ? `${b.team} / ${b.name}`
+      : id
+        ? (tournamentNames[id] ?? id.slice(0, 8))
+        : "Bye";
+  };
   return (
     <>
       <a
@@ -554,27 +730,11 @@ function App() {
                       <Card id={snap?.card} />
                       <span className="card-shadow" />
                     </div>
-                    <div className="auction-clock">
-                      <span className="eyebrow light">
-                        {snap?.finished ? "MATCH COMPLETE" : "BIDDING WINDOW"}
-                      </span>
-                      <div className="clock-number">
-                        {snap?.finished ? "52" : (remaining / 1000).toFixed(1)}
-                        <small>{snap?.finished ? "/52" : "s"}</small>
-                      </div>
-                      <div className="clock-track">
-                        <span
-                          style={{ width: `${Math.min(1, fraction) * 100}%` }}
-                        />
-                      </div>
-                      <p>
-                        {snap?.finished
-                          ? match?.status === "aborted"
-                            ? "Match aborted · unrated"
-                            : "All auctions resolved"
-                          : `Next showdown at card ${Math.min(52, (Math.floor((snap?.round ?? 0) / 13) + 1) * 13)}`}
-                      </p>
-                    </div>
+                    <AuctionClock
+                      match={match}
+                      snap={snap}
+                      offset={clockOffset}
+                    />
                   </div>
                   <div className="deck-progress">
                     <span>
@@ -607,7 +767,7 @@ function App() {
                             <span>
                               {p.house
                                 ? "HOUSE AGENT"
-                                : `CONTENDER ${String(i + 1).padStart(2, "0")}`}
+                                : `CONTENDER ${String(pages.rankings + i + 1).padStart(2, "0")}`}
                             </span>
                           </div>
                           <div className="seat-score">
@@ -713,11 +873,11 @@ function App() {
                       {dir?.lobby.bots.length ?? 0} / {dir?.rules.seats ?? 6}{" "}
                       contenders
                     </strong>
-                    <p>
-                      {dir?.paused
-                        ? "New matches are paused."
-                        : `Lobby starts in ${Math.max(0, Math.ceil(((dir?.lobby.deadline_ms ?? now) - (now + clockOffset)) / 1000))}s. House agents fill open seats.`}
-                    </p>
+                    <LobbyCountdown
+                      deadline={dir?.lobby.deadline_ms}
+                      offset={clockOffset}
+                      paused={dir?.paused}
+                    />
                     <button
                       className="text-link"
                       onClick={() => navigate("workshop")}
@@ -906,7 +1066,9 @@ function App() {
                 <tbody>
                   {leaderboard.map((b, i) => (
                     <tr key={b.id}>
-                      <td className="rank">{String(i + 1).padStart(2, "0")}</td>
+                      <td className="rank">
+                        {String(pages.rankings + i + 1).padStart(2, "0")}
+                      </td>
                       <td>
                         <button
                           className="profile-link"
@@ -940,6 +1102,13 @@ function App() {
                 </div>
               )}
             </div>
+            <PageControls
+              label="rankings"
+              offset={pages.rankings}
+              total={totals.rankings}
+              size={100}
+              onChange={(n) => paginate("rankings", n)}
+            />
             {profile && (
               <section
                 className="profile-panel spaced"
@@ -999,11 +1168,7 @@ function App() {
                             {m.players
                               .filter((p) =>
                                 profileTeam
-                                  ? bots.some(
-                                      (b) =>
-                                        b.team_id === profile.team_id &&
-                                        b.id === p.id,
-                                    )
+                                  ? profileBotIds.has(p.id)
                                   : p.id === profile.id,
                               )
                               .map((p) => (
@@ -1060,6 +1225,13 @@ function App() {
               </section>
             )}
             <h2 className="spaced">Registered contenders</h2>
+            <PageControls
+              label="roster"
+              offset={pages.roster}
+              total={totals.roster}
+              size={100}
+              onChange={(n) => paginate("roster", n)}
+            />
             <div className="contender-grid">
               {bots.map((b) => (
                 <article className="contender" key={b.id}>
@@ -1094,6 +1266,13 @@ function App() {
               Swiss rounds. A top cut. A best-of-three final. Register a bot
               version from your workshop to enter.
             </p>
+            <PageControls
+              label="tournaments"
+              offset={pages.tournaments}
+              total={totals.tournaments}
+              size={10}
+              onChange={(n) => paginate("tournaments", n)}
+            />
             <div className="tournament-list">
               {tournaments.map((t) => (
                 <article className="tournament" key={t.id}>
@@ -1259,14 +1438,7 @@ function App() {
                     </div>
                   </div>
                   {t.history.length > 0 && (
-                    <details>
-                      <summary>Previous pairings ({t.history.length})</summary>
-                      {t.history.map((p) => (
-                        <p key={p.id}>
-                          {name(p.a)} vs {name(p.b)} → {name(p.winner)}
-                        </p>
-                      ))}
-                    </details>
+                    <PreviousPairings history={t.history} name={name} />
                   )}
                 </article>
               ))}
@@ -1306,6 +1478,24 @@ function App() {
             matches={dir?.matches ?? []}
             bots={bots}
             refresh={refresh}
+            rosterPager={
+              <PageControls
+                label="operator roster"
+                offset={pages.roster}
+                total={totals.roster}
+                size={100}
+                onChange={(n) => paginate("roster", n)}
+              />
+            }
+            tournamentPager={
+              <PageControls
+                label="operator tournaments"
+                offset={pages.tournaments}
+                total={totals.tournaments}
+                size={10}
+                onChange={(n) => paginate("tournaments", n)}
+              />
+            }
           />
         )}
         {![
@@ -1999,11 +2189,15 @@ function Operator({
   matches,
   bots,
   refresh,
+  rosterPager,
+  tournamentPager,
 }: {
   tournaments: Tournament[];
   matches: Summary[];
   bots: Bot[];
   refresh: () => void;
+  rosterPager: React.ReactNode;
+  tournamentPager: React.ReactNode;
 }) {
   const [token, setToken] = useState("");
   const [name, setName] = useState("");
@@ -2109,6 +2303,7 @@ function Operator({
         </button>
       </form>
       <h2 className="spaced">Tournaments</h2>
+      {tournamentPager}
       {tournaments.map((t) => (
         <div className="operator-row" key={t.id}>
           <span>
@@ -2164,6 +2359,7 @@ function Operator({
         </div>
       ))}
       <h2 className="spaced">Teams</h2>
+      {rosterPager}
       {Array.from(new Map(bots.map((b) => [b.team_id, b])).values()).map(
         (b) => (
           <div className="operator-row" key={b.team_id}>

@@ -2104,3 +2104,16 @@ summary {
 .profile-panel td span {
   display: block;
 }
+
+.page-controls {
+  display: flex;
+  align-items: center;
+  gap: 22px;
+  justify-content: flex-end;
+  padding: 16px 0;
+  font-size: 10px;
+  color: #7a866c;
+}
+.page-controls > span {
+  margin-right: auto;
+}

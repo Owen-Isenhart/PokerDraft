@@ -176,7 +176,8 @@ def main():
             service.kill(); service.wait(timeout=5)
             service = server(directory)
             assert next(t for t in get('/api/tournaments')['tournaments'] if t['id'] == cup['id'])['champion'] == final['champion']
-            assert get('/api/leaderboard') == hard_ratings
+            restored_ratings=get('/api/leaderboard')
+            assert restored_ratings == hard_ratings, {'before':hard_ratings,'after':restored_ratings}
             crashed = get(f"/api/matches/{hard_live[0]['id']}/replay")
             assert crashed['status'] == 'aborted' and crashed['history'][-1]['finished'] and crashed['snapshot']['seed']
             print('PASS: hard restart preserves completed tournament and ratings')

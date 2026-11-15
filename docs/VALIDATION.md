@@ -1,4 +1,6 @@
-# Release validation — 2026-11-15
+# Initial release validation — 2026-11-15
+
+This records the initial release checkpoint. The follow-up expands coverage to 37 Rust tests, 7 Python tests and 3 browser flows; current security and performance evidence is in [the security review](review/SECURITY.md) and [optimization report](review/OPTIMIZATION.md).
 
 Validation ran on the managed Linux x86-64 workspace (three available logical CPUs), Rust 1.100 stable, Node 24.22.1, Python 3.12.14 and system Chromium. Application minimum Rust is 1.90; tests used the installed stable toolchain. These are local results, not a production capacity guarantee.
 
@@ -51,7 +53,7 @@ node scripts/load.mjs 20 5
 
 ## Remaining operational limits
 
-Deployment, TLS/ingress and Proxmox/k3s manifests are intentionally deferred. The application is one authoritative process with one local SQLite WAL database, 16 simultaneous match slots and a 512-bot rolling queue. It does not claim geographically equal latency or thousands of measured active bots. Account metadata and public replay reads share the writer service; large archives or identity counts should be profiled before increasing defaults. Database retention is operator-managed; turn demos off if continuous demonstration archives are unwanted.
+Deployment, TLS/ingress and Proxmox/k3s manifests are intentionally deferred. The application is one authoritative process with one local SQLite WAL database, 16 simultaneous match slots and a 512-bot rolling queue. It does not claim geographically equal latency or thousands of measured active bots. The initial checkpoint shared public reads with the writer; the follow-up isolates archive/metadata reads, indexes history and caps metadata pages. Account metadata still uses a durable JSON world; profile larger identity counts before increasing defaults. Database retention is operator-managed; turn demos off if continuous demonstration archives are unwanted.
 
 The operator is trusted with seeds and sealed bids. Public replay can verify economic transitions and the committed shuffle, not private bid allocation or operator seed selection. Open registration does not establish unique human identities or prove absence of collusion. Tournament draws replay; persistently inactive/tied entrants require cancellation by the operator. The economy is an explicit configurable-by-code game design, not a mathematically proven balanced equilibrium; the simulator supports future strategy/economy studies.
 

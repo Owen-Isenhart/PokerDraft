@@ -7,12 +7,14 @@ Public snapshots are the only strategy input; secrets are never logged.
 import os
 import sys
 import time
+from collections import deque
 from pokerdraft import Client, ProtocolError, decide_bid, best_hand
 
 
 def run(url, token, once=False):
     backoff = 1
     completed = set()
+    completed_order = deque()
     while True:
         client = None
         try:
@@ -58,6 +60,9 @@ def run(url, token, once=False):
                     if mid in completed:
                         continue
                     completed.add(mid)
+                    completed_order.append(mid)
+                    if len(completed_order)>128:
+                        completed.discard(completed_order.popleft())
                     print(f"Match {mid[:8]} {match['status']}: score {snapshot['players'][seat]['score']}", flush=True)
                     if once:
                         return

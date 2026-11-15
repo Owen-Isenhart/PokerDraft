@@ -4,7 +4,7 @@ All currency is fictional, integer, nonredeemable game points. No wagering, paym
 
 ## Match and information
 
-Default: six seats, 100 starting credits, 52 distinct cards, one 1,000 ms auction per card. Configurable seats 2–8, auction window 250–10,000 ms, first- or second-price payment. Every thirteenth award is followed immediately by an automatic showdown. The final showdown is followed by liquidation and ranking. Bots never need to send a showdown packet under a short deadline.
+Default: six seats, 100 starting credits, 52 distinct cards, one 1,000 ms auction per card. Configurable seats 2–8, auction window 250–10,000 ms, first- or second-price payment. Every thirteenth auction (including a burned card) is followed immediately by an automatic showdown. The final showdown is followed by liquidation and ranking. Bots never need to send a showdown packet under a short deadline.
 
 Card ID = suit * 13 + rank index: suits clubs, diamonds, hearts, spades; ranks 2 through ace. Deck is a Fisher–Yates shuffle using ChaCha20 seeded with 32 random bytes. Initial commitment is SHA256 of that seed. Seed is disclosed only on completion or abort; seed and rules version reproduce the complete deck. Ownership, inventories, balances, scores, resolved prices and cash-ins are public. Open bids, bidder counts, unaccepted actions and future cards are private. Bid amounts are not disclosed after resolution either; only the clearing price is public. The operator is trusted with live secrets.
 

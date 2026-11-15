@@ -80,15 +80,38 @@ impl Tournament {
             .map(|p| p.points)
             .sum()
     }
-    pub fn standings(&self) -> Vec<&Entrant> {
-        let mut v: Vec<_> = self.entrants.iter().collect();
-        v.sort_by(|a, b| {
+    pub fn standings_with_buchholz(&self) -> Vec<(&Entrant, u32)> {
+        let points: std::collections::HashMap<_, _> = self
+            .entrants
+            .iter()
+            .map(|e| (e.bot.as_str(), e.points))
+            .collect();
+        let mut v: Vec<_> = self
+            .entrants
+            .iter()
+            .map(|e| {
+                (
+                    e,
+                    e.opponents
+                        .iter()
+                        .filter_map(|id| points.get(id.as_str()))
+                        .sum::<u32>(),
+                )
+            })
+            .collect();
+        v.sort_by(|(a, ab), (b, bb)| {
             b.points
                 .cmp(&a.points)
-                .then_with(|| self.buchholz(b).cmp(&self.buchholz(a)))
+                .then(bb.cmp(ab))
                 .then(a.seed.cmp(&b.seed))
         });
         v
+    }
+    pub fn standings(&self) -> Vec<&Entrant> {
+        self.standings_with_buchholz()
+            .into_iter()
+            .map(|(e, _)| e)
+            .collect()
     }
     pub fn start(&mut self) -> Result<(), String> {
         if self.state != "registration" || self.entrants.len() < self.cut {

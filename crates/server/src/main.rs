@@ -36,6 +36,7 @@ struct App {
     security: Arc<Security>,
     connections: Arc<tokio::sync::Semaphore>,
     http: Arc<tokio::sync::Semaphore>,
+    metrics_hash: Option<String>,
 }
 async fn admission(
     State(a): State<App>,
@@ -43,6 +44,9 @@ async fn admission(
     request: Request,
     next: Next,
 ) -> Response {
+    if request.uri().to_string().len() > 1024 {
+        return StatusCode::URI_TOO_LONG.into_response();
+    }
     if !a.security.host(request.headers()) {
         return (StatusCode::FORBIDDEN, "host_rejected").into_response();
     }
@@ -178,7 +182,10 @@ async fn ws(
     let Ok(permit) = a.connections.clone().try_acquire_owned() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let Ok(peer_permit) = a.security.sockets(peer.ip()).try_acquire_owned() else {
+    let Some(slots) = a.security.sockets(peer.ip()) else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let Ok(peer_permit) = slots.try_acquire_owned() else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
     upgrade
@@ -227,7 +234,7 @@ async fn session(socket: WebSocket, a: App, peer: IpAddr) {
                         let (op,rid)=match validate_request(&b){Ok(v)=>v,Err(_)=>break};
                         let r=match op {
                             "ping"=>Ok(json!({"server_time_ms":service::now_ms()})),
-                            "watch"=>{if let Some(id)=b["match_id"].as_str(){match a.handle.read("match",id,0).await{Ok(v)=>{watch=id.into();Ok(json!({"match":v}))},Err(e)=>Err(e)}}else{Err("missing_match_id".into())}},
+                            "watch"=>{if let Some(id)=b["match_id"].as_str(){match a.handle.read("match",id,0).await{Ok(v)=>{watch=format!("match:{id}");Ok(json!({"match":v}))},Err(e)=>Err(e)}}else{Err("missing_match_id".into())}},
                             "auth"=>{
                                 token.clear();bot.clear();
                                 if let Some(t)=b["token"].as_str(){match a.handle.command(t.into(),json!({"op":"auth","id":rid})).await {Ok(v)=>{token=t.into();bot=v["bot_id"].as_str().unwrap_or("").into();Ok(v)},Err(e)=>Err(e)}}else{Err("missing_token".into())}
@@ -241,7 +248,7 @@ async fn session(socket: WebSocket, a: App, peer: IpAddr) {
                 }
             },
             event=feed.recv()=>match event {
-                Ok(f)=>if f.topic=="directory"||f.topic==format!("match:{watch}")||(!bot.is_empty()&&f.bots.contains(&bot)){Some(Message::Text(f.value.to_string().into()))}else{None},
+                Ok(f)=>if f.topic.as_ref()=="directory"||f.topic.as_ref()==watch.as_str()||(!bot.is_empty()&&f.bots.contains(&bot)){Some(f.message())}else{None},
                 Err(_)=>break,
             },
             _=heartbeat.tick()=>{if last_seen.elapsed()>Duration::from_secs(60){break;}Some(Message::Text(json!({"type":"heartbeat","server_time_ms":service::now_ms()}).to_string().into()))}
@@ -259,8 +266,20 @@ async fn session(socket: WebSocket, a: App, peer: IpAddr) {
 async fn health(State(a): State<App>) -> Response {
     response(a.handle.read("health", "", 0).await)
 }
-async fn metrics(State(a): State<App>) -> Response {
-    match a.handle.read("health", "", 0).await {
+async fn metrics(State(a): State<App>, headers: HeaderMap) -> Response {
+    use sha2::{Digest, Sha256};
+    let Some(expected) = &a.metrics_hash else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let token = headers
+        .get("authorization")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if hex::encode(Sha256::digest(token.as_bytes())) != *expected {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    match a.handle.metrics().await {
         Ok(v) => {
             let s = format!(
                 "# TYPE pokerdraft_commands_total counter\npokerdraft_commands_total {}\n# TYPE pokerdraft_rejected_total counter\npokerdraft_rejected_total {}\n# TYPE pokerdraft_active_matches gauge\npokerdraft_active_matches {}\n# TYPE pokerdraft_max_tick_lag_ms gauge\npokerdraft_max_tick_lag_ms {}\n",
@@ -322,11 +341,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .unwrap_or_else(|_| "localhost,127.0.0.1,[::1]".into()),
         &std::env::var("POKERDRAFT_ALLOWED_ORIGINS").unwrap_or_default(),
     )?;
+    let metrics_secret = std::env::var("POKERDRAFT_METRICS_TOKEN").ok();
+    if metrics_secret.as_ref().is_some_and(|s| s.len() < 32) {
+        return Err("POKERDRAFT_METRICS_TOKEN must contain at least 32 characters".into());
+    }
+    use sha2::{Digest, Sha256};
     let app = App {
         handle: handle.clone(),
         security: Arc::new(security),
         connections: Arc::new(tokio::sync::Semaphore::new(2048)),
         http: Arc::new(tokio::sync::Semaphore::new(256)),
+        metrics_hash: metrics_secret.map(|s| hex::encode(Sha256::digest(s.as_bytes()))),
     };
     let web = std::env::var("POKERDRAFT_WEB").unwrap_or_else(|_| "web/dist".into());
     let router=Router::new().route("/api/command",post(command)).route("/api/bots/{id}/matches",get(bot_history)).route("/api/teams/{id}/matches",get(team_history)).route("/api/matches/{id}/replay",get(replay)).route("/api/matches/{id}",get(read_match)).route("/api/{kind}",get(read)).route("/healthz",get(health)).route("/metrics",get(metrics)).route("/ws",get(ws))

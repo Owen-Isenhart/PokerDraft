@@ -320,11 +320,20 @@ impl Game {
 
 /// A small transparent baseline, not a claimed optimal strategy.
 pub fn reference_bid(game: &Snapshot, seat: usize) -> u32 {
-    let p = &game.players[seat];
-    if p.cards.len() >= 10 || p.balance == 0 || game.finished {
+    bid_for_player(
+        &game.players[seat],
+        if game.finished { None } else { game.card },
+        game.round,
+        seat,
+    )
+}
+fn bid_for_player(p: &Player, card: Option<u8>, round: usize, seat: usize) -> u32 {
+    let Some(card) = card else {
+        return 0;
+    };
+    if p.cards.len() >= 10 || p.balance == 0 {
         return 0;
     }
-    let card = game.card.unwrap();
     let pairs = p.cards.iter().filter(|&&c| c % 13 == card % 13).count() as u32;
     let suited = p.cards.iter().filter(|&&c| c / 13 == card / 13).count() as u32;
     let neighbors = p
@@ -333,13 +342,15 @@ pub fn reference_bid(game: &Snapshot, seat: usize) -> u32 {
         .filter(|&&c| (c % 13).abs_diff(card % 13) <= 2)
         .count() as u32;
     let mut value = 2 + pairs * 5 + suited + neighbors;
-    let mut next = p.cards.clone();
-    next.push(card);
-    if let Some(hand) = best(&next) {
+    let mut next = [0u8; 10];
+    let len = p.cards.len();
+    next[..len].copy_from_slice(&p.cards);
+    next[len] = card;
+    if let Some(hand) = best(&next[..len + 1]) {
         value += hand.reward / 5;
     }
     // Stable diversification; no privileged knowledge of the deck or live bids.
-    value += ((game.round + seat * 7) % 4) as u32;
+    value += ((round + seat * 7) % 4) as u32;
     value.min(p.balance / 3 + 1).min(p.balance)
 }
 pub fn play_house(game: &mut Game, seat: usize) {
@@ -348,7 +359,17 @@ pub fn play_house(game: &mut Game, seat: usize) {
     {
         let _ = game.cash(seat, game.round, hand.cards);
     }
-    let amount = reference_bid(&game.snapshot(), seat);
+    // Same public inputs as the SDK policy, without cloning every seat/hash per bid.
+    let amount = bid_for_player(
+        &game.players[seat],
+        if game.finished {
+            None
+        } else {
+            Some(game.deck[game.round])
+        },
+        game.round,
+        seat,
+    );
     let _ = game.bid(seat, game.round, amount);
 }
 

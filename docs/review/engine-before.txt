@@ -1,0 +1,2 @@
+{"burns":0,"cash_ins":60831,"elapsed_ms":2385,"matches":10000,"score_totals":[826933,1174906,2093420,1948877,797571,1178804]}
+best_of_ten_ns: 6198

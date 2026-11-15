@@ -15,12 +15,12 @@ def call(path='/api/command',body=None,token='',headers=None):
     with r:
         raw=r.read();
         try:value=json.loads(raw)
-        except ValueError:value={}
+        except ValueError:value={'text':raw.decode(errors='replace')}
         return r.status,r.headers,value
 
 def cmd(op,token='',**fields):return call(body={'id':str(uuid.uuid4()),'op':op,**fields},token=token)
 def start(db,port=3111):
-    env=dict(os.environ,POKERDRAFT_DB=str(db),POKERDRAFT_BIND=f'127.0.0.1:{port}',POKERDRAFT_AUCTION_MS='250',RUST_LOG='error')
+    env=dict(os.environ,POKERDRAFT_DB=str(db),POKERDRAFT_BIND=f'127.0.0.1:{port}',POKERDRAFT_AUCTION_MS='250',RUST_LOG='error',POKERDRAFT_METRICS_TOKEN='isolated-metrics-fixture-token-123456789')
     return subprocess.Popen([str(ROOT/'target/release/pokerdraft-server')],cwd=ROOT,env=env,stdout=subprocess.DEVNULL,stderr=subprocess.PIPE)
 def main():
  with tempfile.TemporaryDirectory(prefix='pokerdraft-security-') as directory:
@@ -30,6 +30,10 @@ def main():
             try:call('/healthz');break
             except OSError:time.sleep(.05)
         assert p.poll() is None
+        public_health=call('/healthz')[2]['result']
+        assert 'commands' not in public_health and 'rejected' not in public_health
+        assert call('/metrics')[0]==401 and call('/api/metrics')[0]==404
+        assert call('/metrics',token='isolated-metrics-fixture-token-123456789')[0]==200
         for h in [{'Host':'attacker.example','Origin':'http://attacker.example'},{'Origin':'null'},{'Origin':'https://attacker.example'}]:assert call('/api/directory',headers=h)[0]==403
         assert call('/api/matches?offset=18446744073709551615')[0]==400
         assert call(body={'op':'ping','id':{'x':1}})[0]==400

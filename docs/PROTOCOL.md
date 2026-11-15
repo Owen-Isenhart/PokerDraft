@@ -1,6 +1,6 @@
 # Bot/API protocol v1
 
-Server root: `http://localhost:3000`; use HTTPS/WSS at an external reverse proxy. All credentials are random 256-bit bearer secrets. Owner and bot roles are separate. No tokens in URLs. Public routes require no authentication.
+Server root: `http://localhost:3000`; use HTTPS/WSS at an external reverse proxy. All credentials are random 256-bit bearer secrets. Owner and bot roles are separate. No tokens in URLs. Public competition routes require no authentication; optional `/metrics` requires a separate metrics bearer credential.
 
 ## WebSocket
 
@@ -61,11 +61,13 @@ Typical rejection strings: `bot_auth_required`, `owner_auth_required`, `admin_au
 
 ## HTTP
 
-`GET /healthz`, `/metrics` (Prometheus text), `/api/directory`, `/api/bots`, `/api/leaderboard`, `/api/tournaments`, `/api/matches?offset=0`, `/api/matches/{id}`, `/api/matches/{id}/replay`.
+`GET /healthz`, `/metrics` (optional authenticated Prometheus text), `/api/directory`, `/api/bots`, `/api/leaderboard`, `/api/tournaments`, `/api/matches?offset=0`, `/api/matches/{id}`, `/api/matches/{id}/replay`.
 
-`GET /api/bots/{id}/matches?offset=0` and `/api/teams/{id}/matches?offset=0` return public version/team match history, 50 records per page.
+`GET /api/bots/{id}/matches?offset=0` and `/api/teams/{id}/matches?offset=0` return public version/team match history, 50 records per page, with `bot_ids` identifying the requested membership independently of roster pagination.
 
 JSON responses: `{ok:true,result:...}` or `{ok:false,error:"..."}`. HTTP parser/body-limit errors may use framework text responses. `/api/matches` returns 50 newest records, offset pagination. Replay includes full public `events`, `history` snapshots and timestamps, never the private DB seed column. Live replay has no seed disclosure. Archived match results include seeds. Leaderboard excludes house agents, disabled teams and versions with no rated games.
+
+`/api/bots?offset=0` and `/api/leaderboard?offset=0` return up to 100 `bots`; `/api/tournaments?offset=0` returns up to 10 tournaments, newest first, with `standings` and a public entrant `names` map. These responses include `total`, `offset` and nullable `next_offset`. Ranks preserve global ordering across pages. `/healthz` returns status/protocol, active match count and scheduler lag, without command/rejection counters. `/metrics` is 404 unless configured with `POKERDRAFT_METRICS_TOKEN`; when enabled it requires that token in the Authorization bearer header.
 
 POST `/api/command`, `Content-Type: application/json`, body `{op,id,...fields}`. Privileged operations use `Authorization: Bearer CREDENTIAL` (the `token` body field is only meaningful to WS auth). The bot command subset also works over this HTTP endpoint, but persistent WS is preferred.
 
@@ -87,7 +89,7 @@ POST `/api/command`, `Content-Type: application/json`, body `{op,id,...fields}`.
 
 Create-team result contains `team` and one-time `owner_token`; create-bot result contains public `bot` and one-time `bot_token`. Tokens are stored as SHA-256 digests in SQLite, never plaintext. There is no email/password provider. Losing an owner credential loses self-service access: save it offline. A bot credential can always be rotated by its owner. Do not publish credentials or put them in bot source.
 
-HTTP mutations are limited to 600/min and 5 team creations/min per socket peer IP. WS handshakes limited to 30/min per peer IP. Forwarded IP headers are deliberately untrusted. For external hosting, enforce public-client limits at your reverse proxy as well; otherwise all clients behind it share these limits. Cross-origin browser mutation/WS requests require same Host origin or an exact `POKERDRAFT_ALLOWED_ORIGINS` entry. There is no wildcard CORS credential access.
+Admission limits are listed below and shared by socket peer IP. Forwarded IP headers are deliberately untrusted. For external hosting, enforce public-client limits at your reverse proxy as well; otherwise all clients behind it share these limits. Cross-origin browser mutation/WS requests require same Host origin or an exact `POKERDRAFT_ALLOWED_ORIGINS` entry. There is no wildcard CORS credential access.
 
 ## Security-review admission limits
 

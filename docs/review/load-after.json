@@ -1,0 +1,19 @@
+{
+  "requested_clients": 20,
+  "seconds": 5,
+  "messages": 1420,
+  "bytes": 1278860,
+  "errors": 0,
+  "ping": {
+    "receipts": 800,
+    "p50_ms": 0.784,
+    "p95_ms": 3.051,
+    "p99_ms": 4.461
+  },
+  "service_read": {
+    "receipts": 180,
+    "p50_ms": 1.807,
+    "p95_ms": 5.666,
+    "p99_ms": 6.619
+  }
+}
