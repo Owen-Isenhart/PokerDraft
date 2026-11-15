@@ -12,7 +12,7 @@ Validation ran on the managed Linux x86-64 workspace (three available logical CP
 | Seeded full-match invariants | 300 complete games, no duplicate cards or inventory overflow; exactly 52 auctions |
 | Auction and economy cases | First/second price, sealed snapshots, immutable bids, invalid-input atomicity, wheel/kickers, inventory cap, all-pass termination, seed disclosure |
 | Tournament engine | Odd Swiss field/byes, draw replay, top cut, elimination and best-of-three final |
-| 9 service tests | Scoped credentials and rotation, private receipt handling, deadline enforcement, queue/tournament exclusivity, atomic durable results/ratings, restart aborts, tournament pairing recovery, public version/team history, disabling a team aborts every affected live pairing |
+| 10 service tests | Scoped credentials and rotation, anonymous owner-secret replay rejection, private receipt handling, deadline enforcement, queue/tournament exclusivity, atomic durable results/ratings, restart aborts, tournament pairing recovery, public version/team history, disabling a team aborts every affected live pairing |
 | 3 independent Python strategy tests | Pass |
 | Production TypeScript/React build | Pass; ~81.1 kB gzip JS and ~6.8 kB gzip CSS |
 | 2 Chromium browser flows | Pass at 1440px desktop and 390px mobile; no horizontal overflow or uncaught page errors; live table, workshop/team/version credentials, locking, rankings/history, tournaments, docs anchors, completed replay playback/scrubbing and revealed seed |

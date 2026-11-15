@@ -372,6 +372,11 @@ impl Service {
         if request_id.is_empty() || request_id.len() > 100 {
             return Err("invalid_request_id".into());
         }
+        // A public request ID is not an authorization credential. Never cache the
+        // one-time owner secret from anonymous registration for receipt replay.
+        if op == "create_team" {
+            return self.apply(token, op, b);
+        }
         let key = format!("{}:{request_id}", hash(token));
         let payload = hash(&b.to_string());
         // Authenticate even cache hits: revoked credentials cannot retrieve prior receipts.
@@ -1048,6 +1053,15 @@ mod tests {
             b["bot_token"].as_str().unwrap().into(),
             b["bot"]["id"].as_str().unwrap().into(),
         )
+    }
+    #[test]
+    fn anonymous_registration_cannot_replay_owner_secret() {
+        let mut s = service();
+        let body = json!({"op":"create_team","id":"predictable-public-id","name":"Alpha"});
+        let created = s.command("", &body).unwrap();
+        assert!(created["owner_token"].is_string());
+        assert_eq!(s.command("", &body).unwrap_err(), "team_name_taken");
+        assert!(s.retries.is_empty());
     }
     #[test]
     fn credentials_scopes_rotation_and_no_leaks() {
