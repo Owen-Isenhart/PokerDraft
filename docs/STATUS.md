@@ -1,9 +1,15 @@
 # Delivery status
 
-- Research review, versioned rules and full implementation plan: complete and pushed.
-- Deterministic engine, sealed first/second-price auctions, cash-ins/showdowns, seeded simulation and tournament state machine: complete and pushed.
-- Durable Rust service, scoped credentials, rolling lobby, ratings, tournament scheduling and recovery: implemented; 7 service tests pass.
-- Spectator/participant UI, bot starters, protocol and operations docs: integration in progress.
-- Release verification: 11 engine tests pass, including all 2,598,960 five-card category checks and 300 seeded full-match invariants. Initial 2,000-match simulation: 476 ms on this environment; best-of-ten ~6.3 µs. Networked capacity not yet measured.
+**Full application implemented and locally validated. Deployment intentionally deferred.**
 
-No deployment has been performed. See PLAN.md for complete scope and remaining release checks.
+| Planned checkpoint | Delivered |
+| --- | --- |
+| Research and precise rules | Original report retained; unsupported claims corrected; visibility, economy, deadlines, randomness and tournament rules versioned |
+| Deterministic engine | Exact evaluator, sealed first/second-price auctions, cash-in, automatic showdowns, final liquidation, seeded ties and simulator |
+| Durable service | HTTP/WS, scoped hashed owner/bot credentials, rotation, named versions, rolling lobby/house fill, bounded queues, idempotent receipts, public archive/replay, Elo and restart abort policy |
+| Tournaments | Registration locks, Swiss/byes/Buchholz, top cut, elimination, best-of-three final, persistent rescheduling and operator cancellation |
+| Spectator and participant app | Responsive live arena/tape, replay timeline/download/seed audit, rankings, version/team history, workshop, tournament registration and operator console |
+| Participant and operations tools | Standard-library Python and zero-dependency TypeScript starters, training simulator, replay verifier, protocol docs, local build/dev commands, CI, health/metrics, load script and verified backup tool |
+| Release checks | 20 Rust tests, 3 Python tests, 2 browser flows, exhaustive evaluator, real agents/tournament, graceful and hard restart, replay tamper rejection, online backup and dependency audit |
+
+Implementation checkpoints have been committed and periodically pushed to `work`. See VALIDATION.md for measured results and honest limits, PLAN.md for the acceptance contract, and OPERATIONS.md for local launch and future single-replica homelab constraints. No infrastructure was deployed or paid service configured.

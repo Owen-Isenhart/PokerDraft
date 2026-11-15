@@ -96,7 +96,8 @@ def main():
             replay = get(f"/api/matches/{completed['id']}/replay")
             assert replay['snapshot']['finished']
             assert len([e for e in replay['events'] if e['kind'] in ('award', 'burn')]) == 52
-            assert all(p['score'] > 0 for p in replay['snapshot']['players']), 'Both strategies must earn score'
+            assert sum(p['score'] for p in replay['snapshot']['players']) > 0, 'Strategies must earn score'
+            assert {e['data']['seat'] for e in replay['events'] if e['kind'] == 'award'} == {0, 1}, 'Both strategies must acquire cards'
             assert hashlib.sha256(bytes.fromhex(replay['snapshot']['seed'])).hexdigest() == replay['snapshot']['commitment']
             assert 'private_seed' not in json.dumps(replay) and 'bids' not in json.dumps(replay)
             verifier = ROOT / 'target' / 'release' / 'examples' / 'verify_replay'

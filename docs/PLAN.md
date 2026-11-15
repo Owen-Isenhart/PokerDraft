@@ -17,3 +17,7 @@ No real money; no remote bot code execution or arbitrary webhook URLs. External 
 ## Delivery tracking
 
 Each checkpoint updates `docs/STATUS.md` with actual work, validation and remaining gaps. `work` is the implementation branch. Push after meaningful checkpoints and before stopping; do not rewrite remote history.
+
+## Completion
+
+All seven application checkpoints are delivered; detailed evidence is in STATUS.md and VALIDATION.md. Deployment remains deferred by request. The release includes operational limits explicitly, including trusted operator, physical network latency, single-writer capacity, manual archive retention and repeated tournament draw handling. No machine-learning subscription or GPU is part of the required implementation.

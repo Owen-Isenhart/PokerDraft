@@ -63,6 +63,21 @@ test("live arena, mobile layout, replay and participant workshop", async ({
   await expect(
     page.getByRole("heading", { name: "The leaderboard." }),
   ).toBeVisible();
+  await page
+    .locator(".contender")
+    .filter({ hasText: "browser-v1" })
+    .last()
+    .getByRole("button", { name: "browser-v1", exact: true })
+    .click();
+  await expect(
+    page.getByRole("region", { name: "Contender history" }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "All team versions", exact: true })
+    .click();
+  await expect(
+    page.getByText("No matches recorded yet.", { exact: true }),
+  ).toBeVisible();
   await page.getByRole("link", { name: "Tournaments", exact: true }).click();
   await expect(
     page.getByRole("heading", { name: "Play for the table." }),

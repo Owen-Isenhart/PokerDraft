@@ -61,6 +61,8 @@ Typical rejection strings: `bot_auth_required`, `owner_auth_required`, `admin_au
 
 `GET /healthz`, `/metrics` (Prometheus text), `/api/directory`, `/api/bots`, `/api/leaderboard`, `/api/tournaments`, `/api/matches?offset=0`, `/api/matches/{id}`, `/api/matches/{id}/replay`.
 
+`GET /api/bots/{id}/matches?offset=0` and `/api/teams/{id}/matches?offset=0` return public version/team match history, 50 records per page.
+
 JSON responses: `{ok:true,result:...}` or `{ok:false,error:"..."}`. HTTP parser/body-limit errors may use framework text responses. `/api/matches` returns 50 newest records, offset pagination. Replay includes full public `events`, `history` snapshots and timestamps, never the private DB seed column. Live replay has no seed disclosure. Archived match results include seeds. Leaderboard excludes house agents, disabled teams and versions with no rated games.
 
 POST `/api/command`, `Content-Type: application/json`, body `{op,id,...fields}`. Privileged operations use `Authorization: Bearer CREDENTIAL` (the `token` body field is only meaningful to WS auth). The bot command subset also works over this HTTP endpoint, but persistent WS is preferred.

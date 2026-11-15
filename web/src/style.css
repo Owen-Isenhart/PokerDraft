@@ -2077,3 +2077,30 @@ summary {
     scroll-behavior: auto !important;
   }
 }
+
+.profile-link {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  border-bottom: 1px solid #aab99b;
+  padding: 0;
+  text-align: left;
+  cursor: pointer;
+}
+.profile-link:hover {
+  color: #598044;
+}
+.profile-panel {
+  padding: 27px;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  background: #edf0e4;
+}
+.profile-panel .eyebrow {
+  color: #7c8a70;
+  margin-top: 0;
+}
+.profile-panel td span {
+  display: block;
+}

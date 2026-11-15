@@ -56,6 +56,17 @@ impl Store {
         rows.collect::<Result<Vec<_>, _>>()
             .map_err(|e| e.to_string())
     }
+    pub fn history_for(&self, ids: &[String], offset: usize) -> Result<Vec<Value>, String> {
+        let ids = serde_json::to_string(ids).map_err(|e| e.to_string())?;
+        let mut stmt = self.conn.prepare("SELECT id,status,created_ms,snapshot,tournament FROM matches WHERE EXISTS (SELECT 1 FROM json_each(matches.snapshot,'$.players') p WHERE json_extract(p.value,'$.id') IN (SELECT value FROM json_each(?1))) ORDER BY created_ms DESC,id LIMIT 50 OFFSET ?2").map_err(|e|e.to_string())?;
+        let rows = stmt.query_map(params![ids,offset.min(i64::MAX as usize) as i64],|r| {
+            let snap:String=r.get(3)?;
+            let snap:Value=serde_json::from_str(&snap).unwrap_or(Value::Null);
+            Ok(json!({"id":r.get::<_,String>(0)?,"status":r.get::<_,String>(1)?,"created_ms":r.get::<_,i64>(2)?,"players":snap["players"],"round":snap["round"],"tournament":r.get::<_,Option<String>>(4)?}))
+        }).map_err(|e|e.to_string())?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|e| e.to_string())
+    }
     pub fn recover(&mut self, world: &mut World) -> Result<usize, String> {
         let rows: Vec<(String, String)> = {
             let mut stmt = self

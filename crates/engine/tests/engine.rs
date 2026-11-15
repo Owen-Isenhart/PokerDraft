@@ -128,17 +128,21 @@ fn elo_zero_sum_ties() {
 #[test]
 fn exhaustive_five_card_categories() {
     let mut counts = [0u32; 9];
+    let mut unique_ranks = std::collections::HashSet::new();
     for a in 0..48 {
         for b in a + 1..49 {
             for c in b + 1..50 {
                 for d in c + 1..51 {
                     for e in d + 1..52 {
-                        counts[evaluate([a, b, c, d, e]).category as usize] += 1;
+                        let hand = evaluate([a, b, c, d, e]);
+                        counts[hand.category as usize] += 1;
+                        unique_ranks.insert(hand.rank);
                     }
                 }
             }
         }
     }
+    assert_eq!(unique_ranks.len(), 7462);
     assert_eq!(
         counts,
         [1302540, 1098240, 123552, 54912, 10200, 5108, 3744, 624, 40]

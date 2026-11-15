@@ -122,6 +122,23 @@ function App() {
   const [archiveOffset, setArchiveOffset] = useState(0);
   const [bots, setBots] = useState<Bot[]>([]);
   const [leaderboard, setLeaderboard] = useState<Bot[]>([]);
+  const [profile, setProfile] = useState<Bot | null>(null);
+  const [profileHistory, setProfileHistory] = useState<Summary[]>([]);
+  const [profileTeam, setProfileTeam] = useState(false);
+  const [profileOffset, setProfileOffset] = useState(0);
+  async function viewProfile(b: Bot, team = false, offset = 0) {
+    try {
+      const r = await api<{ matches: Summary[] }>(
+        `/api/${team ? "teams" : "bots"}/${team ? b.team_id : b.id}/matches?offset=${offset}`,
+      );
+      setProfile(b);
+      setProfileHistory(r.matches);
+      setProfileTeam(team);
+      setProfileOffset(offset);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
   const [tournaments, setTournaments] = useState<Tournament[]>([]);
   const [standings, setStandings] = useState<Standings[]>([]);
   const [error, setError] = useState("");
@@ -133,6 +150,7 @@ function App() {
   const [socketGeneration, setSocketGeneration] = useState(0);
   const socket = useRef<WebSocket | null>(null);
   const selectedRef = useRef("");
+  const archiveOffsetRef = useRef(0);
   const dirRef = useRef<Directory | null>(null);
   const errors = useRef(0);
   const refreshTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -158,8 +176,10 @@ function App() {
         ),
         api<{ bots: Bot[] }>("/api/leaderboard"),
       ]);
-      setArchive(a.matches);
-      setArchiveOffset(0);
+      if (archiveOffsetRef.current === 0) {
+        setArchive(a.matches);
+        setArchiveOffset(0);
+      }
       setBots(b.bots);
       setTournaments(t.tournaments);
       setStandings(t.standings);
@@ -301,15 +321,23 @@ function App() {
     return () => clearInterval(timer);
   }, [playing, match?.history]);
   useEffect(() => {
+    let cancelled = false;
     if (owner)
       command<{ team: { id: string; name: string }; bots: Bot[] }>(
         "account",
         {},
         owner,
       )
-        .then(setAccount)
-        .catch(() => setAccount(null));
+        .then((a) => {
+          if (!cancelled) setAccount(a);
+        })
+        .catch(() => {
+          if (!cancelled) setAccount(null);
+        });
     else setAccount(null);
+    return () => {
+      cancelled = true;
+    };
   }, [owner]);
   const snap: Snapshot | null =
     replayIndex !== null && match?.history
@@ -808,6 +836,7 @@ function App() {
                       );
                       setArchive(r.matches);
                       setArchiveOffset(offset);
+                      archiveOffsetRef.current = offset;
                     } catch (e) {
                       setError(String(e));
                     }
@@ -816,7 +845,14 @@ function App() {
                   Older drafts →
                 </button>
                 {archiveOffset > 0 && (
-                  <button className="text-link" onClick={refresh}>
+                  <button
+                    className="text-link"
+                    onClick={() => {
+                      archiveOffsetRef.current = 0;
+                      setArchiveOffset(0);
+                      refresh();
+                    }}
+                  >
                     Back to latest
                   </button>
                 )}
@@ -867,7 +903,12 @@ function App() {
                     <tr key={b.id}>
                       <td className="rank">{String(i + 1).padStart(2, "0")}</td>
                       <td>
-                        <strong>{b.name}</strong>
+                        <button
+                          className="profile-link"
+                          onClick={() => viewProfile(b)}
+                        >
+                          {b.name}
+                        </button>
                       </td>
                       <td>{b.team}</td>
                       <td>
@@ -894,6 +935,125 @@ function App() {
                 </div>
               )}
             </div>
+            {profile && (
+              <section
+                className="profile-panel spaced"
+                aria-label="Contender history"
+              >
+                <div className="section-heading">
+                  <div>
+                    <p className="eyebrow">{profile.team}</p>
+                    <h2>
+                      {profile.name} · {profile.rating.toFixed(0)} Elo
+                    </h2>
+                  </div>
+                  <button
+                    className="text-link"
+                    onClick={() => setProfile(null)}
+                  >
+                    Close history ×
+                  </button>
+                </div>
+                <div className="action-row">
+                  <button
+                    className={`button compact ${!profileTeam ? "dark" : ""}`}
+                    onClick={() => viewProfile(profile)}
+                  >
+                    This version
+                  </button>
+                  <button
+                    className={`button compact ${profileTeam ? "dark" : ""}`}
+                    onClick={() => viewProfile(profile, true)}
+                  >
+                    All team versions
+                  </button>
+                </div>
+                <div className="data-table spaced">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>Match</th>
+                        <th>Status</th>
+                        <th>Earned score</th>
+                        <th>Replay</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {profileHistory.map((m) => (
+                        <tr key={m.id}>
+                          <td>
+                            #{m.id.slice(0, 8)}
+                            <small>
+                              {m.created_ms
+                                ? new Date(m.created_ms).toLocaleString()
+                                : ""}
+                            </small>
+                          </td>
+                          <td>{m.status}</td>
+                          <td>
+                            {m.players
+                              .filter((p) =>
+                                profileTeam
+                                  ? bots.some(
+                                      (b) =>
+                                        b.team_id === profile.team_id &&
+                                        b.id === p.id,
+                                    )
+                                  : p.id === profile.id,
+                              )
+                              .map((p) => (
+                                <span key={p.id}>
+                                  {p.name} · {p.score} points
+                                </span>
+                              ))}
+                          </td>
+                          <td>
+                            <button
+                              className="text-link"
+                              onClick={() => {
+                                loadMatch(m.id, true);
+                                navigate("arena");
+                              }}
+                            >
+                              Watch <Arrow />
+                            </button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  {!profileHistory.length && (
+                    <p className="empty-note">No matches recorded yet.</p>
+                  )}
+                </div>
+                <div className="action-row spaced">
+                  {profileOffset > 0 && (
+                    <button
+                      className="text-link"
+                      onClick={() =>
+                        viewProfile(
+                          profile,
+                          profileTeam,
+                          Math.max(0, profileOffset - 50),
+                        )
+                      }
+                    >
+                      ← Newer
+                    </button>
+                  )}
+                  {profileHistory.length === 50 && (
+                    <button
+                      className="text-link"
+                      onClick={() =>
+                        viewProfile(profile, profileTeam, profileOffset + 50)
+                      }
+                    >
+                      Older →
+                    </button>
+                  )}
+                </div>
+              </section>
+            )}
             <h2 className="spaced">Registered contenders</h2>
             <div className="contender-grid">
               {bots.map((b) => (
@@ -901,7 +1061,14 @@ function App() {
                   <Badge>
                     {b.disabled ? "DISABLED" : b.games ? "RATED" : "UNRATED"}
                   </Badge>
-                  <h3>{b.name}</h3>
+                  <h3>
+                    <button
+                      className="profile-link"
+                      onClick={() => viewProfile(b)}
+                    >
+                      {b.name}
+                    </button>
+                  </h3>
                   <p>{b.team}</p>
                   <span>
                     {b.rating.toFixed(0)} Elo · {b.games} games

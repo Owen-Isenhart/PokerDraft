@@ -114,6 +114,20 @@ async fn read(State(a): State<App>, Path(kind): Path<String>, Query(p): Query<Pa
 async fn read_match(State(a): State<App>, Path(id): Path<String>) -> Response {
     response(a.handle.read("match", &id, 0).await)
 }
+async fn bot_history(
+    State(a): State<App>,
+    Path(id): Path<String>,
+    Query(p): Query<Paging>,
+) -> Response {
+    response(a.handle.read("bot_matches", &id, p.offset).await)
+}
+async fn team_history(
+    State(a): State<App>,
+    Path(id): Path<String>,
+    Query(p): Query<Paging>,
+) -> Response {
+    response(a.handle.read("team_matches", &id, p.offset).await)
+}
 async fn replay(State(a): State<App>, Path(id): Path<String>) -> Response {
     response(a.handle.read("replay", &id, 0).await)
 }
@@ -297,7 +311,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         connections: Arc::new(tokio::sync::Semaphore::new(2048)),
     };
     let web = std::env::var("POKERDRAFT_WEB").unwrap_or_else(|_| "web/dist".into());
-    let router=Router::new().route("/api/command",post(command)).route("/api/matches/{id}/replay",get(replay)).route("/api/matches/{id}",get(read_match)).route("/api/{kind}",get(read)).route("/healthz",get(health)).route("/metrics",get(metrics)).route("/ws",get(ws))
+    let router=Router::new().route("/api/command",post(command)).route("/api/bots/{id}/matches",get(bot_history)).route("/api/teams/{id}/matches",get(team_history)).route("/api/matches/{id}/replay",get(replay)).route("/api/matches/{id}",get(read_match)).route("/api/{kind}",get(read)).route("/healthz",get(health)).route("/metrics",get(metrics)).route("/ws",get(ws))
   .fallback_service(ServeDir::new(&web).not_found_service(ServeFile::new(format!("{web}/index.html"))))
   .layer(axum::extract::DefaultBodyLimit::max(8192))
   .layer(SetResponseHeaderLayer::if_not_present(axum::http::header::X_CONTENT_TYPE_OPTIONS,HeaderValue::from_static("nosniff")))

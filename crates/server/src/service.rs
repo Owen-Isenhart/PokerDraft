@@ -288,6 +288,27 @@ impl Service {
                 }
             }
             "replay" => self.store.record(id),
+            "bot_matches" | "team_matches" => {
+                let ids: Vec<String> = if kind == "bot_matches" {
+                    if !self.world.bots.iter().any(|b| b.id == id) {
+                        return Err("bot_not_found".into());
+                    }
+                    vec![id.into()]
+                } else {
+                    if !self.world.teams.iter().any(|t| t.id == id) {
+                        return Err("team_not_found".into());
+                    }
+                    self.world
+                        .bots
+                        .iter()
+                        .filter(|b| b.team_id == id)
+                        .map(|b| b.id.clone())
+                        .collect()
+                };
+                Ok(
+                    json!({"matches":self.store.history_for(&ids,offset)?,"offset":offset,"next_offset":offset+50}),
+                )
+            }
             "tournaments" => Ok(
                 json!({"tournaments":self.world.tournaments,"standings":self.world.tournaments.iter().map(|t|json!({"id":t.id,"entries":t.standings().iter().map(|e|json!({"bot":e.bot,"points":e.points,"buchholz":t.buchholz(e),"byes":e.byes})).collect::<Vec<_>>()})).collect::<Vec<_>>()}),
             ),
@@ -701,13 +722,28 @@ impl Service {
                     for id in mids {
                         self.abort_match(&id, "team_disabled")?;
                     }
-                    // Cancel registered tournaments rather than repeatedly schedule a disabled participant.
+                    // Cancel every pairing of affected tournaments, including other teams' live games.
+                    let mut cancelled = HashSet::new();
                     for t in &mut self.world.tournaments {
                         if t.entrants.iter().any(|e| ids.contains(&e.bot))
                             && !["complete", "cancelled"].contains(&t.state.as_str())
                         {
                             t.state = "cancelled".into();
+                            cancelled.insert(t.id.clone());
                         }
+                    }
+                    let mids: Vec<_> = self
+                        .live
+                        .iter()
+                        .filter(|(_, l)| {
+                            l.tournament
+                                .as_ref()
+                                .is_some_and(|p| cancelled.contains(&p.0))
+                        })
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    for mid in mids {
+                        self.abort_match(&mid, "tournament_cancelled")?;
                     }
                 }
                 self.persist(&[])?;
@@ -1112,6 +1148,76 @@ mod tests {
         assert!(w.bots.iter().all(|b| b.games == 1));
         assert!((w.bots.iter().map(|b| b.rating).sum::<f64>() - 3000.).abs() < 1e-8);
         assert!(s.live.is_empty());
+    }
+    #[test]
+    fn disabling_team_cancels_all_active_tournament_pairings() {
+        let mut s = service();
+        let t = cmd(
+            &mut s,
+            "test-admin",
+            json!({"op":"admin_create_tournament","name":"Four Cup","cut":4,"swiss_rounds":1}),
+        )
+        .unwrap();
+        let tid = t["tournament"]["id"].clone();
+        let mut team = String::new();
+        for name in ["Alpha", "Bravo", "Charlie", "Delta"] {
+            let (owner, _, bot) = user(&mut s, name);
+            if team.is_empty() {
+                team = s.owner(&owner).unwrap();
+            }
+            cmd(
+                &mut s,
+                &owner,
+                json!({"op":"register_tournament","tournament_id":tid,"bot_id":bot}),
+            )
+            .unwrap();
+        }
+        cmd(
+            &mut s,
+            "test-admin",
+            json!({"op":"admin_start_tournament","tournament_id":tid}),
+        )
+        .unwrap();
+        s.tick().unwrap();
+        assert_eq!(s.live.len(), 2);
+        cmd(
+            &mut s,
+            "test-admin",
+            json!({"op":"admin_disable_team","team_id":team,"disabled":true}),
+        )
+        .unwrap();
+        assert!(s.live.is_empty());
+        assert_eq!(s.world.tournaments[0].state, "cancelled");
+        assert!(s.world.bots.iter().all(|b| b.games == 0));
+    }
+    #[test]
+    fn public_bot_and_team_history_are_scoped() {
+        let mut s = service();
+        let (owner, _, bot) = user(&mut s, "Alpha");
+        let (_, _, other) = user(&mut s, "Bravo");
+        let team = s.owner(&owner).unwrap();
+        s.start_match(vec![bot.clone()], None, false).unwrap();
+        assert_eq!(
+            s.read("bot_matches", &bot, 0).unwrap()["matches"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            s.read("team_matches", &team, 0).unwrap()["matches"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert!(
+            s.read("bot_matches", &other, 0).unwrap()["matches"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(s.read("bot_matches", "missing", 0).is_err());
     }
     #[test]
     fn admin_authorization_required() {
