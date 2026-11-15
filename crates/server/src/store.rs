@@ -27,13 +27,15 @@ impl Store {
             .unwrap_or_else(|| Ok(World::default()))
     }
     /// Result snapshot, history, world ratings and tournament state commit together.
-    pub fn save(&mut self, world: &World, records: &[Value]) -> Result<(), String> {
+    pub fn save(&mut self, world: Option<&World>, records: &[Value]) -> Result<(), String> {
         let tx = self.conn.transaction().map_err(|e| e.to_string())?;
-        tx.execute(
-            "INSERT INTO world VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
-            [serde_json::to_string(world).map_err(|e| e.to_string())?],
-        )
-        .map_err(|e| e.to_string())?;
+        if let Some(world) = world {
+            tx.execute(
+                "INSERT INTO world VALUES(1,?1) ON CONFLICT(id) DO UPDATE SET data=excluded.data",
+                [serde_json::to_string(world).map_err(|e| e.to_string())?],
+            )
+            .map_err(|e| e.to_string())?;
+        }
         for r in records {
             tx.execute("INSERT INTO matches VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET status=excluded.status,updated_ms=excluded.updated_ms,snapshot=excluded.snapshot,events=excluded.events,history=excluded.history",params![r["id"].as_str(),r["status"].as_str(),r["created_ms"].as_i64(),r["updated_ms"].as_i64(),r["snapshot"].to_string(),r["events"].to_string(),r["history"].to_string(),r["private_seed"].as_str(),r["tournament"].as_str()]).map_err(|e|e.to_string())?;
         }
@@ -88,7 +90,7 @@ impl Store {
                 }
             }
         }
-        self.save(world, &records)?;
+        self.save(Some(world), &records)?;
         Ok(count)
     }
 }

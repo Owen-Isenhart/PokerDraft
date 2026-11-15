@@ -137,13 +137,14 @@ impl Tournament {
         if p.winner.is_some() {
             return Err("already_resolved".into());
         }
-        p.match_id = None;
         let Some(winner) = winner else {
+            p.match_id = None;
             return Ok(());
         }; // Draw: replay, no arbitrary seat winner.
         if winner != p.a && Some(&winner) != p.b.as_ref() {
             return Err("invalid_winner".into());
         }
+        p.match_id = None;
         let side = usize::from(winner != p.a);
         p.wins[side] += 1;
         if self.state == "final" && p.wins[side] < 2 {
@@ -207,7 +208,7 @@ impl Tournament {
             "elimination"
         }
         .into();
-        for p in winners.chunks_exact(2) {
+        for p in winners.as_chunks::<2>().0 {
             self.make(p[0].clone(), Some(p[1].clone()));
         }
     }

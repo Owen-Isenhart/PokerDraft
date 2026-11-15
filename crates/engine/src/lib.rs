@@ -342,10 +342,10 @@ pub fn reference_bid(game: &Snapshot, seat: usize) -> u32 {
     value.min(p.balance / 3 + 1).min(p.balance)
 }
 pub fn play_house(game: &mut Game, seat: usize) {
-    if let Some(hand) = best(&game.players[seat].cards) {
-        if hand.reward >= 35 || game.players[seat].cards.len() >= 9 {
-            let _ = game.cash(seat, game.round, hand.cards);
-        }
+    if let Some(hand) = best(&game.players[seat].cards)
+        && (hand.reward >= 35 || game.players[seat].cards.len() >= 9)
+    {
+        let _ = game.cash(seat, game.round, hand.cards);
     }
     let amount = reference_bid(&game.snapshot(), seat);
     let _ = game.bid(seat, game.round, amount);

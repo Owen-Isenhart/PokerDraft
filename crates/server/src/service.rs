@@ -224,7 +224,12 @@ impl Service {
     }
     fn persist(&mut self, records: &[Value]) -> Result<(), String> {
         self.store
-            .save(&self.world, records)
+            .save(Some(&self.world), records)
+            .map_err(|e| format!("storage_failure:{e}"))
+    }
+    fn persist_records(&mut self, records: &[Value]) -> Result<(), String> {
+        self.store
+            .save(None, records)
             .map_err(|e| format!("storage_failure:{e}"))
     }
     fn publish(&self, topic: &str, bots: Vec<String>, value: Value) {
@@ -256,7 +261,15 @@ impl Service {
                     .world
                     .bots
                     .iter()
-                    .filter(|b| !b.disabled && b.games > 0)
+                    .filter(|b| {
+                        !b.disabled
+                            && b.games > 0
+                            && self
+                                .world
+                                .teams
+                                .iter()
+                                .any(|t| t.id == b.team_id && !t.disabled)
+                    })
                     .collect();
                 bots.sort_by(|a, b| b.rating.total_cmp(&a.rating));
                 Ok(json!({"bots":bots.into_iter().map(|b|self.bot_public(b)).collect::<Vec<_>>() }))
@@ -414,7 +427,9 @@ impl Service {
             }
             "create_bot" => {
                 let team = self.owner(token)?;
-                if self.world.bots.iter().filter(|b| b.team_id == team).count() >= 100 {
+                if self.world.bots.len() >= 10000
+                    || self.world.bots.iter().filter(|b| b.team_id == team).count() >= 100
+                {
                     return Err("version_limit".into());
                 }
                 let name = label(b["name"].as_str().ok_or("missing_name")?)?;
@@ -533,7 +548,7 @@ impl Service {
                     let record = l.record(mid, "live");
                     let public = l.public(mid);
                     let bots = l.game.players.iter().map(|p| p.id.clone()).collect();
-                    self.persist(&[record])?;
+                    self.persist_records(&[record])?;
                     self.publish(
                         &format!("match:{mid}"),
                         bots,
@@ -760,7 +775,7 @@ impl Service {
                 .match_id = Some(mid.clone());
         }
         let snap = game.snapshot();
-        let l = Live {
+        let mut l = Live {
             game,
             seed: hex::encode(seed),
             created_ms: now_ms(),
@@ -770,9 +785,15 @@ impl Service {
             tournament,
         };
         let record = l.record(&mid, "live");
+        if l.tournament.is_some() {
+            self.persist(&[record])?;
+        } else {
+            self.persist_records(&[record])?;
+        }
+        l.deadline = Instant::now() + Duration::from_millis(self.rules.auction_ms);
+        l.deadline_ms = now_ms() + self.rules.auction_ms;
         let public = l.public(&mid);
         let bots = l.game.players.iter().map(|p| p.id.clone()).collect();
-        self.persist(&[record])?;
         self.live.insert(mid.clone(), l);
         self.publish(
             &format!("match:{mid}"),
@@ -808,7 +829,7 @@ impl Service {
             } else {
                 // A fresh full window begins after durable settlement; never catch up by skipping windows.
                 let record = l.record(&mid, "live");
-                self.persist(&[record])?;
+                self.persist_records(&[record])?;
                 let l = self.live.get_mut(&mid).unwrap();
                 l.deadline = Instant::now() + Duration::from_millis(l.game.rules.auction_ms);
                 l.deadline_ms = now_ms() + l.game.rules.auction_ms;
@@ -901,10 +922,10 @@ impl Service {
                     real[1].id.clone()
                 })
             };
-            if let Some(t) = self.world.tournaments.iter_mut().find(|t| &t.id == tid) {
-                if t.state != "cancelled" {
-                    t.result(*ix, winner)?;
-                }
+            if let Some(t) = self.world.tournaments.iter_mut().find(|t| &t.id == tid)
+                && t.state != "cancelled"
+            {
+                t.result(*ix, winner)?;
             }
         }
         self.persist(&[l.record(mid, "complete")])?;
@@ -923,10 +944,10 @@ impl Service {
         let mut l = self.live.remove(mid).ok_or("match_not_live")?;
         l.game.abort(reason);
         l.history.push(l.game.snapshot());
-        if let Some((tid, ix)) = &l.tournament {
-            if let Some(t) = self.world.tournaments.iter_mut().find(|t| &t.id == tid) {
-                t.pairings[*ix].match_id = None;
-            }
+        if let Some((tid, ix)) = &l.tournament
+            && let Some(t) = self.world.tournaments.iter_mut().find(|t| &t.id == tid)
+        {
+            t.pairings[*ix].match_id = None;
         }
         self.persist(&[l.record(mid, "aborted")])?;
         let mut public = l.public(mid);

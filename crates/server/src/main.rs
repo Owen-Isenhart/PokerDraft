@@ -253,10 +253,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         )
         .init();
     let db = std::env::var("POKERDRAFT_DB").unwrap_or_else(|_| "data/pokerdraft.db".into());
-    if let Some(parent) = std::path::Path::new(&db).parent() {
-        if !parent.as_os_str().is_empty() {
-            std::fs::create_dir_all(parent)?;
-        }
+    if let Some(parent) = std::path::Path::new(&db).parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
     }
     let rules = pokerdraft_engine::Rules {
         seats: std::env::var("POKERDRAFT_SEATS")
@@ -312,6 +312,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         router.into_make_service_with_connect_info::<SocketAddr>(),
     )
     .with_graceful_shutdown(async move {
+        #[cfg(unix)]
+        {
+            let mut term =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("SIGTERM handler");
+            tokio::select! { _ = tokio::signal::ctrl_c() => {}, _ = term.recv() => {} }
+        }
+        #[cfg(not(unix))]
         let _ = tokio::signal::ctrl_c().await;
         handle.shutdown().await;
     })
